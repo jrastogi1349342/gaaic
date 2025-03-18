@@ -1,0 +1,122 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+from torch.cuda.amp import autocast, GradScaler
+
+class PerturbationModel(nn.Module): 
+    def __init__(self, latent_dim, l_inf_norm = 0.05, l2_norm=0.1, device="cuda"): 
+        super().__init__()
+
+        self.l_inf_norm = l_inf_norm
+        self.l2_norm = l2_norm
+        self.device = device
+
+        self.fc = nn.Sequential(
+            nn.Linear(latent_dim, 512), 
+            nn.ReLU(), 
+            nn.Linear(512, 2048), 
+            nn.ReLU(), 
+            nn.Linear(2048, 3 * 640 * 640), 
+            nn.Tanh()
+        )
+
+    def forward(self, latent_state): 
+        perturbation = self.fc(latent_state).view(-1, 3, 640, 640) * self.l_inf_norm
+        return self.bound_perturbation(perturbation)
+    
+    # Bound L2 norm
+    def bound_perturbation(self, perturbation): 
+        norm = torch.norm(perturbation.view(perturbation.shape[0], -1), dim=1, keepdim=True).clamp(min=1e-6)
+        factor = torch.clamp(self.l2_norm / norm, max=1.0)
+        return perturbation * factor.view(-1, 1, 1, 1)
+
+class SAC(nn.Module): 
+    def __init__(self, latent_dim, target_alpha=0.3, device="cuda"):
+        super().__init__()
+
+        self.device = device
+
+        self.actor = PerturbationModel(latent_dim)
+        self.actor_opt = optim.AdamW(self.actor.parameters(), lr=3e-4)
+        
+        self.critic_one = self.create_critic(latent_dim)
+        self.critic_one_opt = optim.AdamW(self.critic_one.parameters(), lr=3e-4)
+        
+        self.critic_two = self.create_critic(latent_dim)
+        self.critic_two_opt = optim.AdamW(self.critic_two.parameters(), lr=3e-4)
+
+        # Log of entropy: start at ln(0.0) = 1 (exploration) and reduce gradually to target 
+        self.log_alpha = torch.tensor(0.0, requires_grad=True, device=self.device)
+        self.target_alpha = target_alpha
+        self.alpha_opt = optim.AdamW([self.log_alpha], lr=3e-4)
+
+        self.scaler = GradScaler("cuda") # Mixed precision training
+
+    def create_critic(self, latent_dim): 
+        return nn.Sequential(
+            nn.Linear(latent_dim + 3 * 640 * 640, 2048), 
+            nn.ReLU(), 
+            nn.Linear(2048, 256), 
+            nn.ReLU(), 
+            nn.Linear(256, 1)
+        ).to(self.device)
+
+    def select_action(self, state): 
+        return self.actor(state)
+
+    def update(self, replay_buffer, batch_size=64, gamma=0.99): 
+        if len(replay_buffer) < batch_size: 
+            return
+        
+        batch = replay_buffer.sample(batch_size)
+        s, a, r, s_prime, dones = zip(*batch)
+
+        s = torch.stack(s).to(self.device)
+        a = torch.stack(a).to(self.device)
+        r = torch.stack(r, dtype=torch.float32).to(self.device).unsqueeze(1)
+        s_prime = torch.stack(s_prime).to(self.device)
+        dones = torch.stack(dones, dtype=torch.float32).to(self.device).unsqueeze(1)
+
+        with autocast(self.device): 
+            sa = torch.cat([s, a], dim=1)
+
+            # Q(s, a) for each critic network for current state
+            q_one = self.critic_one(sa)
+            q_two = self.critic_two(sa)
+
+            s_prime_a = torch.cat([s_prime, self.actor(s_prime)], dim=1)
+
+            # Q(s, a) for each critic network for next state
+            q_one_prime = self.critic_one(s_prime_a).detach()
+            q_two_prime = self.critic_two(s_prime_a).detach()
+
+            fixed_pt_q = r + gamma * (1 - dones) * torch.min(q_one_prime, q_two_prime)
+
+            loss_critic_one = F.mse_loss(q_one, fixed_pt_q)
+            loss_critic_two = F.mse_loss(q_two, fixed_pt_q)
+
+            alpha = self.log_alpha.exp()
+
+            # TODO verify this equation for actor loss
+            actor_loss = -self.critic_one(torch.cat([s, self.actor(s)], dim=1)).mean() + alpha * torch.mean(a)
+
+            alpha_loss = -self.log_alpha * (self.target_alpha + torch.mean(a).detach())
+
+        self.critic_one_opt.zero_grad()
+        self.scaler.scale(loss_critic_one).backward()
+        self.scaler.step(self.critic_one_opt)
+
+        self.critic_two_opt.zero_grad()
+        self.scaler.scale(loss_critic_two).backward()
+        self.scaler.step(self.critic_two_opt)
+
+        self.actor_opt.zero_grad()
+        self.scaler.scale(actor_loss).backward()
+        self.scaler.step(self.actor_opt)
+
+        self.alpha_opt.zero_grad()
+        self.scaler.scale(alpha_loss).backward()
+        self.scaler.step(self.alpha_opt)
+
+        self.scaler.update()
