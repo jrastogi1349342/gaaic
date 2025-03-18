@@ -18,7 +18,8 @@ class COCODataset(Dataset):
         # TODO add augmenting transforms or random resize crops, and normalization
         self.transform = transform or transforms.Compose([
             transforms.Resize((480, 480)), 
-            transforms.ToTensor()
+            transforms.ToTensor(), 
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
 
     def __len__(self): 
@@ -58,7 +59,7 @@ def test_dataloader():
     name = "test-dev2017"
     return form_dataloader(name)
 
-# train_loader = train_dataloader()
-# if train_loader: 
-#     images = next(iter(train_loader)).to(device)
-#     display_img(images[0])
+train_loader = train_dataloader()
+if train_loader: 
+    images = next(iter(train_loader)).to(device)
+    display_img(images[0])
