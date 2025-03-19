@@ -17,12 +17,12 @@ class PerturbationModel(nn.Module):
             nn.ReLU(), 
             nn.Linear(512, 2048), 
             nn.ReLU(), 
-            nn.Linear(2048, 3 * 640 * 640), 
+            nn.Linear(2048, 3 * 480 * 480), 
             nn.Tanh()
-        )
+        ).to(device)
 
     def forward(self, latent_state): 
-        perturbation = self.fc(latent_state).view(-1, 3, 640, 640) * self.l_inf_norm
+        perturbation = self.fc(latent_state).view(-1, 3, 480, 480) * self.l_inf_norm
         return self.bound_perturbation(perturbation)
     
     # Bound L2 norm
@@ -32,10 +32,11 @@ class PerturbationModel(nn.Module):
         return perturbation * factor.view(-1, 1, 1, 1)
 
 class SAC(nn.Module): 
-    def __init__(self, latent_dim, target_alpha=0.3, device="cuda"):
+    def __init__(self, latent_dim, replay_buffer, target_alpha=0.3, device="cuda"):
         super().__init__()
 
         self.device = device
+        self.replay_buffer = replay_buffer
 
         self.actor = PerturbationModel(latent_dim)
         self.actor_opt = optim.AdamW(self.actor.parameters(), lr=3e-4)
@@ -55,7 +56,7 @@ class SAC(nn.Module):
 
     def create_critic(self, latent_dim): 
         return nn.Sequential(
-            nn.Linear(latent_dim + 3 * 640 * 640, 2048), 
+            nn.Linear(latent_dim + 3 * 480 * 480, 2048), 
             nn.ReLU(), 
             nn.Linear(2048, 256), 
             nn.ReLU(), 
@@ -65,11 +66,11 @@ class SAC(nn.Module):
     def select_action(self, state): 
         return self.actor(state)
 
-    def update(self, replay_buffer, batch_size=64, gamma=0.99): 
-        if len(replay_buffer) < batch_size: 
+    def update(self, batch_size=64, gamma=0.99): 
+        if len(self.replay_buffer) < batch_size: 
             return
         
-        batch = replay_buffer.sample(batch_size)
+        batch = self.replay_buffer.sample(batch_size)
         s, a, r, s_prime, dones = zip(*batch)
 
         s = torch.stack(s).to(self.device)
@@ -92,6 +93,8 @@ class SAC(nn.Module):
             q_two_prime = self.critic_two(s_prime_a).detach()
 
             fixed_pt_q = r + gamma * (1 - dones) * torch.min(q_one_prime, q_two_prime)
+
+            priority = max((q_one - fixed_pt_q).abs().mean().item(), (q_two - fixed_pt_q).abs().mean().item())
 
             loss_critic_one = F.mse_loss(q_one, fixed_pt_q)
             loss_critic_two = F.mse_loss(q_two, fixed_pt_q)
@@ -120,3 +123,6 @@ class SAC(nn.Module):
         self.scaler.step(self.alpha_opt)
 
         self.scaler.update()
+
+        for i in range(batch_size): 
+            self.replay_buffer.add((s[i], a[i], r[i], s_prime[i], dones[i]), priority)

@@ -12,6 +12,7 @@ class PrioritizedReplayBuffer:
 
         heapq.heappush(self.heap, (-priority, experience))
 
+    # TODO sample based on location in priority queue, instead of randomly
     def sample(self, batch_size): 
         batch = random.choices(self.heap, k=batch_size)
 
