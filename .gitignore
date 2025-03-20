@@ -1,4 +1,8 @@
 # Venv
 tapod_env/
 
+# Cache
 __pycache__
+
+# NN Weight files
+*.pt
