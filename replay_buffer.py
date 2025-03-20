@@ -1,6 +1,8 @@
 import heapq
 import random
 
+# TODO fix to consider temporal difference error
+# TODO ensure DQN is properly implemented, and consider Rainbow DQN
 class PrioritizedReplayBuffer: 
     def __init__(self, capacity=100000): 
         self.heap = []

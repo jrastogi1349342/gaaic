@@ -4,6 +4,10 @@ import torch.optim as optim
 import torch.nn.functional as F
 from torch.cuda.amp import autocast, GradScaler
 
+from encoder import Encoder
+
+import utils
+
 class PerturbationModel(nn.Module): 
     def __init__(self, latent_dim, l_inf_norm = 0.05, l2_norm=0.1, device="cuda"): 
         super().__init__()
@@ -12,39 +16,70 @@ class PerturbationModel(nn.Module):
         self.l2_norm = l2_norm
         self.device = device
 
+        # 154 MB VRAM for fc and deconv combined
         self.fc = nn.Sequential(
-            nn.Linear(latent_dim, 512), 
-            nn.ReLU(), 
-            nn.Linear(512, 2048), 
-            nn.ReLU(), 
-            nn.Linear(2048, 3 * 480 * 480), 
-            nn.Tanh()
-        ).to(device)
+            nn.Linear(latent_dim, 1024 * 15 * 15), 
+            nn.BatchNorm1d(1024 * 15 * 15),
+            nn.ReLU(inplace=True)
+        ).half().to(device)
 
-    def forward(self, latent_state): 
-        perturbation = self.fc(latent_state).view(-1, 3, 480, 480) * self.l_inf_norm
-        return self.bound_perturbation(perturbation)
+        # TODO optimize memory with groups, fusing conv and batchnorm, etc if possible
+        self.deconv = nn.Sequential(
+            nn.ConvTranspose2d(1024, 512, kernel_size=4, stride=2, padding=1, bias=False), 
+            nn.BatchNorm2d(512), 
+            nn.ReLU(inplace=True), 
+
+            nn.ConvTranspose2d(512, 256, kernel_size=4, stride=2, padding=1, bias=False), 
+            nn.BatchNorm2d(256), 
+            nn.ReLU(inplace=True), 
+
+            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1, bias=False), 
+            nn.BatchNorm2d(128), 
+            nn.ReLU(inplace=True), 
+
+            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1, bias=False), 
+            nn.BatchNorm2d(64), 
+            nn.ReLU(inplace=True), 
+
+            nn.ConvTranspose2d(64, 3, kernel_size=4, stride=2, padding=1, bias=False), 
+            nn.Tanh()
+        ).half().to(device)
+
+    # a = pi(s), for latent state s
+    def forward(self, x): 
+        x = self.fc(x)
+        x = x.view(x.size(0), 1024, 15, 15)
+        x = self.deconv(x) * self.l_inf_norm
+
+        return self.bound_l2(x)
     
     # Bound L2 norm
-    def bound_perturbation(self, perturbation): 
+    def bound_l2(self, perturbation): 
         norm = torch.norm(perturbation.view(perturbation.shape[0], -1), dim=1, keepdim=True).clamp(min=1e-6)
         factor = torch.clamp(self.l2_norm / norm, max=1.0)
         return perturbation * factor.view(-1, 1, 1, 1)
 
 class SAC(nn.Module): 
-    def __init__(self, latent_dim, replay_buffer, target_alpha=0.3, device="cuda"):
+    def __init__(self, latent_dim, replay_buffer, curl, target_alpha=0.3, device="cuda"):
         super().__init__()
 
         self.device = device
         self.replay_buffer = replay_buffer
+        self.curl = curl
 
-        self.actor = PerturbationModel(latent_dim)
+        self.actor = PerturbationModel(latent_dim, device=device)
+        print(f"With Perturbation Model: {utils.get_mem_used()} MB")
+
         self.actor_opt = optim.AdamW(self.actor.parameters(), lr=3e-4)
         
         self.critic_one = self.create_critic(latent_dim)
+        print(f"With Critic 1: {utils.get_mem_used()} MB")
+
         self.critic_one_opt = optim.AdamW(self.critic_one.parameters(), lr=3e-4)
         
         self.critic_two = self.create_critic(latent_dim)
+        print(f"With Critic 2: {utils.get_mem_used()} MB")
+
         self.critic_two_opt = optim.AdamW(self.critic_two.parameters(), lr=3e-4)
 
         # Log of entropy: start at ln(0.0) = 1 (exploration) and reduce gradually to target 
@@ -54,14 +89,20 @@ class SAC(nn.Module):
 
         self.scaler = GradScaler("cuda") # Mixed precision training
 
+    # TODO rethink this model: use conv, pooling layers instead of linear
+    # Take inspiration from encoders/unets
+
+    # Input: s and a, output: Q(s, a)
+    # s: latent dim x 1 vector; a: 480 * 480 * 3 image --> first pass through resnet encoder --> latent dim x 1 vector
+    # s, a concat
     def create_critic(self, latent_dim): 
         return nn.Sequential(
-            nn.Linear(latent_dim + 3 * 480 * 480, 2048), 
-            nn.ReLU(), 
-            nn.Linear(2048, 256), 
-            nn.ReLU(), 
-            nn.Linear(256, 1)
-        ).to(self.device)
+            nn.Linear(2 * latent_dim, latent_dim / 2), 
+            nn.ReLU(inplace=True), 
+            nn.Linear(latent_dim / 2, latent_dim / 8), 
+            nn.ReLU(inplace=True), 
+            nn.Linear(latent_dim / 8, 1)
+        ).half().to(self.device)
 
     def select_action(self, state): 
         return self.actor(state)
@@ -80,6 +121,7 @@ class SAC(nn.Module):
         dones = torch.stack(dones, dtype=torch.float32).to(self.device).unsqueeze(1)
 
         with autocast(self.device): 
+            # TODO ensure a is latent dim x 1 vector here, instead of full image
             sa = torch.cat([s, a], dim=1)
 
             # Q(s, a) for each critic network for current state

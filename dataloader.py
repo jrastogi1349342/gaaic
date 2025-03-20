@@ -59,7 +59,7 @@ def test_dataloader():
     name = "test-dev2017"
     return form_dataloader(name)
 
-train_loader = train_dataloader()
-if train_loader: 
-    images = next(iter(train_loader)).to(device)
-    display_img(images[0])
+# train_loader = train_dataloader()
+# if train_loader: 
+#     images = next(iter(train_loader)).to(device)
+#     display_img(images[0])

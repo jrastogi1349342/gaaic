@@ -142,23 +142,23 @@ def calc_rewards(orig, perturbed, obj_detector, goal, target=None):
     pass
 
 
-boxes_A = torch.tensor([
-    [50, 80, 180, 220],
-    [100, 150, 200, 250],
-    [90, 130, 190, 240], 
-    [-20, 50, -90, 180]
-], device="cuda")  # Bounding boxes in image A
+# boxes_A = torch.tensor([
+#     [50, 80, 180, 220],
+#     [100, 150, 200, 250],
+#     [90, 130, 190, 240], 
+#     [-20, 50, -90, 180]
+# ], device="cuda")  # Bounding boxes in image A
 
-boxes_B = torch.tensor([
-    [120, 140, 210, 260],
-    [50, 80, 180, 220],
-    [200, 200, 300, 350]
-    # ,
-    # [300, 350, 400, 450]
-], device="cuda")  # Bounding boxes in image B
+# boxes_B = torch.tensor([
+#     [120, 140, 210, 260],
+#     [50, 80, 180, 220],
+#     [200, 200, 300, 350]
+#     # ,
+#     # [300, 350, 400, 450]
+# ], device="cuda")  # Bounding boxes in image B
 
-perfect_matches, imperfect_matches, unused_orig, unused_perturbed = greedy_match_bboxes(boxes_A, boxes_B)
-print("Perfect matches:", perfect_matches)
-print("Imperfect matches:", imperfect_matches)
-print("Unused orig:", unused_orig)
-print("Unused perturbed:", unused_perturbed)
+# perfect_matches, imperfect_matches, unused_orig, unused_perturbed = greedy_match_bboxes(boxes_A, boxes_B)
+# print("Perfect matches:", perfect_matches)
+# print("Imperfect matches:", imperfect_matches)
+# print("Unused orig:", unused_orig)
+# print("Unused perturbed:", unused_perturbed)

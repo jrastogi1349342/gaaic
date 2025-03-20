@@ -1,2 +1,4 @@
 # Venv
 tapod_env/
+
+__pycache__
