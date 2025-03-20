@@ -112,7 +112,9 @@ def associate(orig_boxes, perturbed_boxes):
 def calc_rewards(orig, perturbed, obj_detector, goal, target=None): 
     assert goal in {"empty", "untargeted", "targeted"}, f"Goal {goal} not found"
 
-    reward = 0
+    rewards = [0] * len(orig)
+
+    # TODO plot images to verify ranges and that yolo worked properly
 
     orig_results = obj_detector(orig)
     perturbed_results = obj_detector(perturbed)
@@ -125,7 +127,7 @@ def calc_rewards(orig, perturbed, obj_detector, goal, target=None):
 
         if goal == "empty": 
             # TODO rewamp this reward system
-            reward += -10 * same_det + -2 * same_spot_diff_cls + -2 * diff_spot_same_cls + -2 * diff_spot_diff_cls + 10 * removed + 2 * added
+            rewards[i] = -10 * same_det + -2 * same_spot_diff_cls + -2 * diff_spot_same_cls + -2 * diff_spot_diff_cls + 10 * removed + 2 * added
 
             pass
 
@@ -139,7 +141,7 @@ def calc_rewards(orig, perturbed, obj_detector, goal, target=None):
             pass
 
 
-    pass
+    return rewards
 
 
 # boxes_A = torch.tensor([

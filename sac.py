@@ -87,26 +87,28 @@ class SAC(nn.Module):
         self.target_alpha = target_alpha
         self.alpha_opt = optim.AdamW([self.log_alpha], lr=3e-4)
 
-        self.scaler = GradScaler("cuda") # Mixed precision training
-
-    # TODO rethink this model: use conv, pooling layers instead of linear
-    # Take inspiration from encoders/unets
+        self.scaler = GradScaler('cuda') # Mixed precision training
 
     # Input: s and a, output: Q(s, a)
     # s: latent dim x 1 vector; a: 480 * 480 * 3 image --> first pass through resnet encoder --> latent dim x 1 vector
     # s, a concat
     def create_critic(self, latent_dim): 
         return nn.Sequential(
-            nn.Linear(2 * latent_dim, latent_dim / 2), 
-            nn.ReLU(inplace=True), 
-            nn.Linear(latent_dim / 2, latent_dim / 8), 
-            nn.ReLU(inplace=True), 
-            nn.Linear(latent_dim / 8, 1)
+            nn.Linear(2 * latent_dim, latent_dim // 2), 
+            nn.BatchNorm1d(latent_dim // 2),
+            nn.ReLU(inplace=True),
+
+            nn.Linear(latent_dim // 2, latent_dim // 8), 
+            nn.BatchNorm1d(latent_dim // 8),
+            nn.ReLU(inplace=True),
+
+            nn.Linear(latent_dim // 8, 1)
         ).half().to(self.device)
 
     def select_action(self, state): 
         return self.actor(state)
 
+    # TODO verify SAC algorithm
     def update(self, batch_size=64, gamma=0.99): 
         if len(self.replay_buffer) < batch_size: 
             return

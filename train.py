@@ -23,12 +23,12 @@ sac = SAC(latent_dim=latent_dim, replay_buffer=replay_buffer, curl=curl, device=
 
 print(f"With SAC: {utils.get_mem_used()} MB")
 
-obj_detector = YOLO("yolov11n.pt")
+obj_detector = YOLO("yolo11n.pt").to(device)
 
 print(f"With YOLO: {utils.get_mem_used()} MB")
 
 num_epochs = 1
-batch_size = 8
+batch_size = 2
 
 train_data = train_dataloader()
 
@@ -36,15 +36,17 @@ for epoch in range(num_epochs):
     sac.train()
 
     for batch_idx, images in enumerate(train_data): 
-        images = images.to(device)
+        images = images.half().to(device)
         
         s = curl(images)
         a = sac.select_action(s)
 
         perturbed_imgs = torch.clamp(images + a, 0, 1)
 
+        a = curl(a)
+
         s_prime = curl(perturbed_imgs) 
-        r = calc_rewards(s, s_prime, "empty", obj_detector) 
+        r = calc_rewards(images, perturbed_imgs, obj_detector, "empty") 
         dones = [False] * len(images) 
 
         for i in range(len(images)): 
