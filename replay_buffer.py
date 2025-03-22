@@ -8,6 +8,7 @@ class PrioritizedReplayBuffer:
         self.heap = []
         self.capacity = capacity
 
+    # TODO fix bug here
     def add(self, experience, priority): 
         if len(self.heap) >= self.capacity: 
             heapq.heappop(self.heap)
@@ -20,3 +21,5 @@ class PrioritizedReplayBuffer:
 
         return zip(*[t[1] for t in batch])        
         
+    def len(self): 
+        return len(self.heap)

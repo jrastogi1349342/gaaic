@@ -109,8 +109,33 @@ class SAC(nn.Module):
         return self.actor(state)
 
     # TODO verify SAC algorithm
+    # https://en.wikipedia.org/wiki/Actor-critic_algorithm
+    # https://arxiv.org/pdf/1812.05905
+
+    # https://github.com/philipjball/SAC_PyTorch/blob/master/utils.py
+    # https://medium.com/@fydaemalinax/soft-actor-critic-algorithm-from-theory-to-practice-52aef426f1c9
+
+    # https://spinningup.openai.com/en/latest/algorithms/sac.html
+    # https://github.com/rail-berkeley/softlearning/blob/master/softlearning/algorithms/sac.py
+    # https://github.com/denisyarats/pytorch_sac/blob/master/agent/actor.py
+    # https://algorithmsbook.com/files/dm.pdf chp 13
+
+    # Soft Latent Actor Critic (probably won't use this): 
+    # https://medium.com/@ChadMcIntire/how-to-build-stochastic-latent-actor-critic-in-pytorch-pt-1-a23cd8700aba
+    # https://medium.com/@ChadMcIntire/how-to-build-stochastic-latent-actor-critic-in-pytorch-pt-2-f55f2dc68226
+    # https://medium.com/@ChadMcIntire/how-to-build-stochastic-latent-actor-critic-in-pytorch-pt-3-dc0570196527
+    # https://medium.com/@ChadMcIntire/how-to-build-stochastic-latent-actor-critic-in-pytorch-pt-4-a3999f2755b2
+    # https://github.com/toshikwa/slac.pytorch
+    # https://arxiv.org/pdf/1907.00953
+
+    # REINFORCE alg from the amnesia paper
+    # https://proceedings.neurips.cc/paper_files/paper/2024/file/9e770fcdb456400325c11d58b3a04d08-Paper-Conference.pdf
+    # https://www.cs.toronto.edu/~tingwuwang/REINFORCE.pdf
+
+    # CURL
+    # https://arxiv.org/abs/2004.04136
     def update(self, batch_size=64, gamma=0.99): 
-        if len(self.replay_buffer) < batch_size: 
+        if self.replay_buffer.len() < batch_size: 
             return
         
         batch = self.replay_buffer.sample(batch_size)
