@@ -6,3 +6,6 @@ __pycache__
 
 # NN Weight files
 *.pt
+
+# Example files just to see how things work
+examples/

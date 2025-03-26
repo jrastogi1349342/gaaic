@@ -140,6 +140,7 @@ def calc_rewards(orig, perturbed, obj_detector, goal, target=None):
 
             pass
 
+        # TODO implement change to image in reward and/or loss
 
     return rewards
 
