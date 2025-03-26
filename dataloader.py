@@ -43,22 +43,22 @@ def display_img(img):
     plt.axis('off')
     plt.show()
 
-def form_dataloader(name): 
+def form_dataloader(name, batch_size=8, num_workers=4, pin_memory=True): 
     dataset = COCODataset(os.path.join(COCO_DIR, f"{name}2017.txt"), 
                           os.path.join(COCO_DIR, f"images/{name}2017"))
-    return DataLoader(dataset, batch_size=8, shuffle=True, num_workers=4, pin_memory=True)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=pin_memory)
 
-def train_dataloader(): 
+def train_dataloader(batch_size=8, num_workers=4, pin_memory=True): 
     name = "train"
-    return form_dataloader(name)
+    return form_dataloader(name, batch_size=batch_size, num_workers=num_workers, pin_memory=pin_memory)
 
-def val_dataloader(): 
+def val_dataloader(batch_size=8, num_workers=4, pin_memory=True): 
     name = "val"
-    return form_dataloader(name)
+    return form_dataloader(name, batch_size=batch_size, num_workers=num_workers, pin_memory=pin_memory)
 
-def test_dataloader(): 
+def test_dataloader(batch_size=8, num_workers=4, pin_memory=True): 
     name = "test-dev2017"
-    return form_dataloader(name)
+    return form_dataloader(name, batch_size=batch_size, num_workers=num_workers, pin_memory=pin_memory)
 
 # train_loader = train_dataloader()
 # if train_loader: 

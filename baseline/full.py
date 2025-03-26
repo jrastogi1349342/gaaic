@@ -32,16 +32,18 @@ class Encoder(nn.Module):
 
 # Actor
 class PerturbationModel(nn.Module): 
-    def __init__(self, latent_dim, l_inf_norm = 0.05, l2_norm=0.1, device="cuda"): 
+    def __init__(self, latent_dim, low_rank=4, l_inf_norm = 0.05, l2_norm=0.1, device="cuda"): 
         super().__init__()
 
         self.l_inf_norm = l_inf_norm
         self.l2_norm = l2_norm
         self.device = device
+        self.latent_dim = latent_dim
 
         # Gaussian distribution in latent space
         self.mu = nn.Linear(512, latent_dim)
         self.log_std = nn.Linear(512, latent_dim)
+        self.low_rank_factor = nn.Linear(512, latent_dim * low_rank)
 
         # 154 MB VRAM for fc and deconv combined
         self.fc = nn.Sequential(
@@ -78,7 +80,14 @@ class PerturbationModel(nn.Module):
         log_std = self.log_std(x)
         std = torch.exp(log_std)
 
-        return mu, std
+        diag_cov = torch.diag(std ** 2)
+
+        U = self.low_rank_factor(x).view(self.latent_dim, -1)
+        low_rank_cov = U @ U.T # PSD
+
+        cov_mtx = diag_cov + low_rank_cov + torch.eye(self.latent_dim) * 1e-3 # for stability
+
+        return mu, cov_mtx
     
     def decode(self, x):
         x = self.fc(x)
@@ -107,6 +116,7 @@ class Actor_Critic(nn.Module):
 
         self.actor = PerturbationModel(latent_dim, device=device)
 
+        # Input: concatenated state and action latent vectors
         self.critic = nn.Sequential(
             nn.Linear(2 * latent_dim, latent_dim // 2), 
             nn.BatchNorm1d(latent_dim // 2),
@@ -130,11 +140,11 @@ class Actor_Critic(nn.Module):
         # Latent vector for image
         x = self.feature_encoder(x)
 
-        mu, std = self.actor(x)
+        mu, cov_mtx = self.actor(x)
                 
         value = self.critic(x)
         
-        return mu, std, value
+        return mu, cov_mtx, value
 
 SavedAction = namedtuple('SavedAction', ['log_prob', 'value'])
 
@@ -145,14 +155,14 @@ train_data = train_dataloader()
 
 
 def select_action(state):
-    mu, std, value = model(state)
+    mu, cov_mtx, value = model(state)
 
-    dist = torch.distributions.Normal(mu, std)
+    dist = torch.distributions.MultivariateNormal(mu, covariance_matrix=cov_mtx)
 
     action_latent = dist.sample()
 
-    # save to action buffer
-    model.saved_actions.append(SavedAction(dist.log_prob(action_latent).sum(), value))
+    # save to action buffer, MultivariateNormal automatically sums
+    model.saved_actions.append(SavedAction(dist.log_prob(action_latent), value))
 
     return model.actor.decode(action_latent).squeeze(0)
 
@@ -219,9 +229,6 @@ def main():
 
             # take the action
             state, reward, done, _, _ = env.step(action)
-
-            if args.render:
-                env.render()
 
             model.rewards.append(reward)
             ep_reward += reward
