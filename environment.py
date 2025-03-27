@@ -1,51 +1,50 @@
 import torch
 import gymnasium as gym
 import numpy as np
-
+from rewards import calc_rewards
 
 class DataloaderEnv(gym.Env): 
-    def __init__(self, dataloader, max_steps_per_episode=1000, batch_size=8, action_shape=(480, 480, 3)): 
+    def __init__(self, dataloader, object_detector, max_steps_per_episode=1000, batch_size=8, action_shape=(480, 480, 3)): 
         super().__init__
 
         self.dataloader = iter(dataloader)
         self.action_shape = action_shape
-        self.state = None
+        self.batch = None
         self.batch_size = batch_size 
         self.max_steps_per_episode = max_steps_per_episode
-        self.step_ct = 0 # num steps in current episode
+        self.step_idx = 0 # num steps in current episode
+        self.object_detector = object_detector
+
+        sample_state = next(self.dataloader)
+        batch_size, *obs_shape = sample_state.shape
 
         # TODO figure this out
-        self.observation_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(batch_size, *dataloader.dataset[0][0].shape), dtype=np.float32)
-        self.action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(batch_size, *action_shape), dtype=np.float32)
+        self.observation_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(sample_state.shape))
+        self.action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(sample_state.shape))
 
     def reset(self): 
         try:
-            self.state = next(self.dataloader)  
+            self.batch = next(self.dataloader)  # Get next batch (episode)
         except StopIteration:
-            self.dataloader = iter(self.dataloader)  # restart dataLoader
-            self.state = next(self.dataloader)
+            self.dataloader = iter(self.dataloader)  # Restart DataLoader
+            self.batch = next(self.dataloader)
 
-        self.step_ct = 0
-        return self.state
+        self.step_idx = 0
+        return self.batch
     
+    # Action: batch_size x 480x480x3
     def step(self, action): 
-        orig_states = self.state
+        orig_states = self.batch
+        self.step_idx += 1
+
+        # Add action (480x480x3) noise image to each state in batch
+        next_batch = torch.clamp(self.batch + action, 0, 1)
 
         # TODO implement reward function
-        # reward_batches
+        reward_batches, done_batches = calc_rewards(orig_states, next_batch, self.obj_detector, "empty")
 
-        # TODO finish/implement episodes of > 1 step
-        try:
-            self.state = next(self.dataloader)  
-        except StopIteration:
-            self.dataloader = iter(self.dataloader)  # restart dataLoader
-            self.state = next(self.dataloader)
+        done_batches = torch.tensor([True] * self.batch_size) if self.step_idx >= self.max_steps_per_episode else done_batches
 
+        self.batch = next_batch
 
-
-
-
-        
-        pass
-
-    pass
+        return next_batch, reward_batches, done_batches, torch.tensor(), {}

@@ -7,15 +7,20 @@ import numpy as np
 from collections import namedtuple
 import argparse
 from itertools import count
-from ..dataloader import train_dataloader
+import sys
+import os
+from ultralytics import YOLO
 
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from dataloader import train_dataloader
+from environment import DataloaderEnv
 
 parser = argparse.ArgumentParser(description='PyTorch actor-critic example')
 parser.add_argument('--gamma', type=float, default=0.99, metavar='G',
                     help='discount factor (default: 0.99)')
 args = parser.parse_args()
 
-
+# To run: python3 baseline/full.py
 
 class Encoder(nn.Module): 
     def __init__(self, pretrained=True, latent_dim=128, device="cuda"): 
@@ -110,9 +115,10 @@ class Actor_Critic(nn.Module):
     """
     implements both actor and critic in one model
     """
-    def __init__(self, encoder, latent_dim, replay_buffer, curl, target_alpha=0.3, device="cuda"):
+    def __init__(self, encoder, latent_dim, replay_buffer=None, curl=None, target_alpha=0.3, device="cuda"):
         super(Actor_Critic, self).__init__()
         self.feature_encoder = encoder
+        self.device = device
 
         self.actor = PerturbationModel(latent_dim, device=device)
 
@@ -148,11 +154,18 @@ class Actor_Critic(nn.Module):
 
 SavedAction = namedtuple('SavedAction', ['log_prob', 'value'])
 
-model = Actor_Critic()
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+latent_dim = 256
+batch_size = 2
+encoder = Encoder(latent_dim=latent_dim, device=device)
+model = Actor_Critic(encoder=encoder, latent_dim=latent_dim, device=device)
 optimizer = optim.Adam(model.parameters(), lr=3e-2)
 eps = np.finfo(np.float32).eps.item()
-train_data = train_dataloader()
 
+train_data = train_dataloader()
+obj_detector = YOLO("yolo11n.pt").to(device)
+
+env = DataloaderEnv(train_data, object_detector=obj_detector, batch_size=batch_size)
 
 def select_action(state):
     mu, cov_mtx, value = model(state)
@@ -217,22 +230,22 @@ def main():
     for i_episode in count(1):
 
         # reset environment and episode reward
-        state, _ = env.reset()
+        states = env.reset()
         ep_reward = 0
 
         # for each episode, only run 9999 steps so that we don't
         # infinite loop while learning
-        for t in range(1, 10000):
+        for t in range(1, env.max_steps_per_episode):
 
             # select action from policy
-            action = select_action(state)
+            action = select_action(states)
 
             # take the action
-            state, reward, done, _, _ = env.step(action)
+            states, rewards, dones, _, _ = env.step(action)
 
-            model.rewards.append(reward)
-            ep_reward += reward
-            if done:
+            model.rewards.append(rewards)
+            ep_reward += rewards.sum()
+            if dones.eq(torch.tensor([True] * batch_size)):
                 break
 
         # update cumulative reward

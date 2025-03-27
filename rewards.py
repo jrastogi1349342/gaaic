@@ -113,6 +113,7 @@ def calc_rewards(orig, perturbed, obj_detector, goal, target=None):
     assert goal in {"empty", "untargeted", "targeted"}, f"Goal {goal} not found"
 
     rewards = [0] * len(orig)
+    dones = [False] * len(orig)
 
     # TODO plot images to verify ranges and that yolo worked properly
 
@@ -123,11 +124,14 @@ def calc_rewards(orig, perturbed, obj_detector, goal, target=None):
         orig_result = orig_results[i].boxes
         perturbed_result = perturbed_results[i].boxes
 
+        if len(perturbed_result) == 0: 
+            dones[i] = True
+
         same_det, same_spot_diff_cls, diff_spot_same_cls, diff_spot_diff_cls, removed, added = associate(orig_result, perturbed_result)
 
         if goal == "empty": 
             # TODO rewamp this reward system
-            rewards[i] = -10 * same_det + -2 * same_spot_diff_cls + -2 * diff_spot_same_cls + -2 * diff_spot_diff_cls + 10 * removed + 2 * added
+            rewards[i] = -50 * same_det + -25 * same_spot_diff_cls + -15 * diff_spot_same_cls + -15 * diff_spot_diff_cls + 50 * removed + -50 * added
 
             pass
 
@@ -142,7 +146,10 @@ def calc_rewards(orig, perturbed, obj_detector, goal, target=None):
 
         # TODO implement change to image in reward and/or loss
 
-    return rewards
+    rewards_torch = torch.from_numpy(np.array(rewards)) - torch.norm(perturbed - orig, p='fro', dim=(1, 2, 3))
+    dones_torch = torch.from_numpy(np.array(dones))
+
+    return rewards_torch, dones_torch
 
 
 # boxes_A = torch.tensor([
