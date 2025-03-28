@@ -1,6 +1,8 @@
 import torch
 from torchvision.ops import box_iou
 import numpy as np
+from PIL import Image
+from torchvision.transforms import ToPILImage
 
 def greedy_match_bboxes(orig_xyxy, perturbed_xyxy, min_iou=0.95): 
     # M x N
@@ -80,28 +82,32 @@ def associate(orig_boxes, perturbed_boxes):
     orig_xyxy = orig_boxes.xyxy
     perturbed_xyxy = perturbed_boxes.xyxy
 
-    perfect_matches, imperfect_matches, unused_orig, unused_perturbed = greedy_match_bboxes(orig_xyxy, perturbed_xyxy)
+    if len(perturbed_xyxy) == 0: 
+        removed = len(orig_xyxy)
 
-    for orig_idx, perturbed_idx in perfect_matches.items(): 
-        orig_cls = orig_boxes[orig_idx].cls
-        perturbed_cls = perturbed_boxes[perturbed_idx].cls
+    else: 
+        perfect_matches, imperfect_matches, unused_orig, unused_perturbed = greedy_match_bboxes(orig_xyxy, perturbed_xyxy)
 
-        if torch.equal(orig_cls, perturbed_cls): 
-            same_det += 1
-        else: 
-            same_spot_diff_cls += 1
+        for orig_idx, perturbed_idx in perfect_matches.items(): 
+            orig_cls = orig_boxes[orig_idx].cls
+            perturbed_cls = perturbed_boxes[perturbed_idx].cls
 
-    for orig_idx, (perturbed_idx, iou) in imperfect_matches.items(): 
-        orig_cls = orig_boxes[orig_idx].cls
-        perturbed_cls = perturbed_boxes[perturbed_idx].cls
+            if torch.equal(orig_cls, perturbed_cls): 
+                same_det += 1
+            else: 
+                same_spot_diff_cls += 1
 
-        if torch.equal(orig_cls, perturbed_cls): 
-            diff_spot_same_cls += iou
-        else: 
-            diff_spot_diff_cls += iou
+        for orig_idx, (perturbed_idx, iou) in imperfect_matches.items(): 
+            orig_cls = orig_boxes[orig_idx].cls
+            perturbed_cls = perturbed_boxes[perturbed_idx].cls
 
-    removed = len(unused_orig)
-    added = len(unused_perturbed)
+            if torch.equal(orig_cls, perturbed_cls): 
+                diff_spot_same_cls += iou
+            else: 
+                diff_spot_diff_cls += iou
+
+        removed = len(unused_orig)
+        added = len(unused_perturbed)
 
     return same_det, same_spot_diff_cls, diff_spot_same_cls, diff_spot_diff_cls, removed, added
 
@@ -109,7 +115,7 @@ def associate(orig_boxes, perturbed_boxes):
 # Empty: Erase that bounding box
 # Untargeted: Change class of bounding box to something else, doesn't matter what that is
 # Targeted: Change class of bounding box to specific target class
-def calc_rewards(orig, perturbed, obj_detector, goal, target=None): 
+def calc_rewards(orig, perturbed, obj_detector, goal, target=None, device="cuda"): 
     assert goal in {"empty", "untargeted", "targeted"}, f"Goal {goal} not found"
 
     rewards = [0] * len(orig)
@@ -117,8 +123,25 @@ def calc_rewards(orig, perturbed, obj_detector, goal, target=None):
 
     # TODO plot images to verify ranges and that yolo worked properly
 
+    # to_pil = ToPILImage()
+    # for i, r in enumerate(orig):
+    #     img = to_pil(r)
+    #     img.show()
+
+    # for i, r in enumerate(perturbed):
+    #     img = to_pil(r)
+    #     img.show()
+
     orig_results = obj_detector(orig)
     perturbed_results = obj_detector(perturbed)
+
+    # for i, r in enumerate(orig_results):
+    #     im_bgr = r.plot()  # BGR-order numpy array
+    #     r.show()
+
+    # for i, r in enumerate(perturbed_result):
+    #     im_bgr = r.plot()  # BGR-order numpy array
+    #     r.show()
 
     for i in range(len(orig)): 
         orig_result = orig_results[i].boxes
@@ -129,9 +152,11 @@ def calc_rewards(orig, perturbed, obj_detector, goal, target=None):
 
         same_det, same_spot_diff_cls, diff_spot_same_cls, diff_spot_diff_cls, removed, added = associate(orig_result, perturbed_result)
 
+        # TODO normalize by number of detected objects 
         if goal == "empty": 
             # TODO rewamp this reward system
             rewards[i] = -50 * same_det + -25 * same_spot_diff_cls + -15 * diff_spot_same_cls + -15 * diff_spot_diff_cls + 50 * removed + -50 * added
+            rewards[i] /= (same_det + same_spot_diff_cls + diff_spot_same_cls + diff_spot_diff_cls + removed + added)
 
             pass
 
@@ -144,10 +169,11 @@ def calc_rewards(orig, perturbed, obj_detector, goal, target=None):
 
             pass
 
-        # TODO implement change to image in reward and/or loss
-
-    rewards_torch = torch.from_numpy(np.array(rewards)) - torch.norm(perturbed - orig, p='fro', dim=(1, 2, 3))
-    dones_torch = torch.from_numpy(np.array(dones))
+    l2_norms = torch.norm(perturbed - orig, p=2, dim=(1, 2, 3))
+    print("L2 norms:", l2_norms)
+    print("Rewards without L2 norm", rewards)
+    rewards_torch = torch.tensor(rewards, device=device) - l2_norms
+    dones_torch = torch.tensor(dones)
 
     return rewards_torch, dones_torch
 
