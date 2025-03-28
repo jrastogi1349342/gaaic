@@ -32,8 +32,24 @@ class Encoder(nn.Module):
         self.encoder = nn.Sequential(*list(model_base.children())[:-1]).half().to(device) # remove head
         self.fc = nn.Linear(512, latent_dim).half().to(device)
 
+        for param in self.encoder.parameters(): 
+            param.requires_grad = False
+
+        for module in self.encoder.modules():
+            if isinstance(module, torch.nn.BatchNorm2d):
+                module.train()
+
+        torch.nn.utils.clip_grad_norm_(self.fc.parameters(), max_norm=1.0)
+
     def forward(self, x): 
-        return self.fc(self.encoder(x).squeeze(-1).squeeze(-1))
+        assert torch.min(x).positive() 
+        assert not torch.isnan(x).any(), "State contains NaNs!"
+        x = self.encoder(x).squeeze(-1).squeeze(-1)
+        assert not torch.isnan(x).any(), "NaN detected after encoder!"
+        assert not torch.isinf(x).any(), "Inf detected after encoder!"
+        print("Min of latent embedding:", torch.min(x), "Max of latent embedding:", torch.max(x), "Nan:", torch.any(torch.isnan(x)), "Inf:", torch.any(torch.isinf(x)))
+        print("Encoder fc:", self.fc.weight)
+        return self.fc(x)
 
 # Actor
 class PerturbationModel(nn.Module): 
@@ -83,8 +99,13 @@ class PerturbationModel(nn.Module):
 
     # a = pi(s), for latent state s
     def forward(self, x): 
+        print("Mu:", self.mu.weight)
+        print("Log std:", self.log_std.weight)
+        print("Low rank factor:", self.low_rank_factor.weight)
+
         mus = self.mu(x)
         log_std = self.log_std(x)
+        log_std = torch.clamp(log_std, min=-10, max=2) # prevent exploding values
         std = torch.exp(log_std)
         # print(mus.shape, log_std.shape, std.shape)
 
@@ -159,20 +180,24 @@ SavedAction = namedtuple('SavedAction', ['log_prob', 'value'])
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 latent_dim = 256
-batch_size = 2
+batch_size = 8
 num_episodes = 5
 encoder = Encoder(latent_dim=latent_dim, device=device)
 model = Actor_Critic(encoder=encoder, latent_dim=latent_dim, device=device, batch_size=batch_size)
-optimizer = optim.Adam(model.parameters(), lr=3e-2)
+print(model)
+optimizer = optim.Adam(model.parameters(), lr=3e-3)
 eps = np.finfo(np.float32).eps.item()
 
 train_data = train_dataloader(batch_size=batch_size)
-obj_detector = YOLO("yolo11n.pt").to(device)
+obj_detector = YOLO("yolo11n.pt").to(device).eval()
 
 env = DataloaderEnv(train_data, obj_detector=obj_detector, batch_size=batch_size)
 
 def select_action(state):
     latent_state, mus, cov_mtxs = model(state)
+    print("Latent state:", latent_state)
+    print("Mus:", mus)
+    print("Covs:", cov_mtxs)
 
     dist = torch.distributions.MultivariateNormal(mus.to(torch.float32), covariance_matrix=cov_mtxs.to(torch.float32))
 
@@ -206,12 +231,12 @@ def finish_episode():
     returns = torch.stack(returns_lst)
     returns = (returns - returns.mean()) / (returns.std() + eps)
 
-    print("Returns", returns)
+    # print("Returns", returns)
 
     for (log_prob, value), R in zip(saved_actions, returns):
-        print("Log prob", log_prob)
-        print("Val", value)
-        print("Reward", R)
+        # print("Log prob", log_prob)
+        # print("Val", value)
+        # print("Reward", R)
         advantage = R - value
 
         # calculate actor (policy) loss
@@ -225,10 +250,15 @@ def finish_episode():
 
     # sum up all the values of policy_losses and value_losses
     loss = torch.stack(policy_losses).sum() + torch.stack(value_losses).sum()
+    print("Loss", loss)
 
     # perform backprop
     loss.backward()
     optimizer.step()
+
+    for param in model.parameters():
+        if param.grad is not None:
+            print("Param", torch.any(torch.isnan(param.grad)), torch.any(torch.isinf(param.grad)))
 
     # reset rewards and action buffer
     del model.rewards[:]
@@ -238,6 +268,7 @@ def finish_episode():
 
 def main():
     running_reward = 0
+    model.train()
 
     for i_episode in range(num_episodes):
 
@@ -245,7 +276,11 @@ def main():
         states = env.reset()
         ep_reward = 0
 
+        print("Next episode")
+        print(states.dtype)
+
         for t in range(1, env.max_steps_per_episode):
+            print("Type:", states.dtype)
 
             # select action from policy
             action = select_action(states)
@@ -255,8 +290,12 @@ def main():
 
             model.rewards.append(rewards)
             ep_reward += rewards.sum()
+            print(dones, torch.all(dones))
             if torch.all(dones):
                 break
+
+            print("Next step")
+
 
         # Alpha = 0.05
         running_reward = 0.05 * ep_reward + (1 - 0.05) * running_reward

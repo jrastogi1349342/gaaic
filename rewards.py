@@ -3,6 +3,7 @@ from torchvision.ops import box_iou
 import numpy as np
 from PIL import Image
 from torchvision.transforms import ToPILImage
+from dataloader import denormalize_batch
 
 def greedy_match_bboxes(orig_xyxy, perturbed_xyxy, min_iou=0.95): 
     # M x N
@@ -82,10 +83,13 @@ def associate(orig_boxes, perturbed_boxes):
     orig_xyxy = orig_boxes.xyxy
     perturbed_xyxy = perturbed_boxes.xyxy
 
-    if len(perturbed_xyxy) == 0: 
+    if len(orig_xyxy) != 0 and len(perturbed_xyxy) == 0: 
         removed = len(orig_xyxy)
+    
+    elif len(orig_xyxy) == 0 and len(perturbed_xyxy) != 0: 
+        added = len(perturbed_xyxy)
 
-    else: 
+    elif len(orig_xyxy) != 0 and len(perturbed_xyxy) != 0:
         perfect_matches, imperfect_matches, unused_orig, unused_perturbed = greedy_match_bboxes(orig_xyxy, perturbed_xyxy)
 
         for orig_idx, perturbed_idx in perfect_matches.items(): 
@@ -156,7 +160,11 @@ def calc_rewards(orig, perturbed, obj_detector, goal, target=None, device="cuda"
         if goal == "empty": 
             # TODO rewamp this reward system
             rewards[i] = -50 * same_det + -25 * same_spot_diff_cls + -15 * diff_spot_same_cls + -15 * diff_spot_diff_cls + 50 * removed + -50 * added
-            rewards[i] /= (same_det + same_spot_diff_cls + diff_spot_same_cls + diff_spot_diff_cls + removed + added)
+            sum = same_det + same_spot_diff_cls + diff_spot_same_cls + diff_spot_diff_cls + removed + added
+            if sum != 0: 
+                rewards[i] /= sum
+            else: 
+                rewards[i] -= 200 
 
             pass
 

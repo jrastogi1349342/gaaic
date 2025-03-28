@@ -2,6 +2,7 @@ import torch
 import gymnasium as gym
 import numpy as np
 from rewards import calc_rewards
+from dataloader import denormalize_batch, renormalize_batch
 
 class DataloaderEnv(gym.Env): 
     def __init__(self, dataloader, obj_detector, device="cuda", max_steps_per_episode=1000, batch_size=8, action_shape=(480, 480, 3)): 
@@ -41,10 +42,16 @@ class DataloaderEnv(gym.Env):
         # print(torch.min(orig_states), torch.max(orig_states))
 
         # Add action (480x480x3) noise image to each state in batch
-        next_batch = torch.clamp(orig_states + action, 0, 1)
+        perturbed_normalized_to_s = orig_states + action
+
+        orig_denormalized = denormalize_batch(orig_states)
+        perturbed_denormalized = denormalize_batch(perturbed_normalized_to_s)
 
         # TODO implement reward function
-        reward_batches, done_batches = calc_rewards(orig_states, next_batch, self.obj_detector, goal="empty", device=self.device)
+        reward_batches, done_batches = calc_rewards(orig_denormalized, perturbed_denormalized, self.obj_detector, goal="empty", device=self.device)
+
+        # print("Actions", action.shape, action)
+        next_batch = (renormalize_batch(perturbed_denormalized)).half().to(self.device)
 
         done_batches = torch.tensor([True] * self.batch_size) if self.step_idx >= self.max_steps_per_episode else done_batches
 
