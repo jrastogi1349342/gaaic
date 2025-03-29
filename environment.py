@@ -55,6 +55,8 @@ class DataloaderEnv(gym.Env):
 
         done_batches = torch.tensor([True] * self.batch_size) if self.step_idx >= self.max_steps_per_episode else done_batches
 
+        del self.batch
+
         self.batch = next_batch
 
         return next_batch, reward_batches, done_batches, {}, {}
