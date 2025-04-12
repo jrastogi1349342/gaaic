@@ -158,7 +158,7 @@ def calc_rewards(orig, perturbed, obj_detector, goal, target=None, device="cuda"
 
         # TODO normalize by number of detected objects 
         if goal == "empty": 
-            # TODO rewamp this reward system
+            # TODO rewamp this reward system, prof said to bring rewards down
             rewards[i] = -50 * same_det + -25 * same_spot_diff_cls + -15 * diff_spot_same_cls + -15 * diff_spot_diff_cls + 50 * removed + -50 * added
             sum = same_det + same_spot_diff_cls + diff_spot_same_cls + diff_spot_diff_cls + removed + added
             if sum != 0: 

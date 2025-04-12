@@ -14,11 +14,14 @@ from ultralytics import YOLO
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from dataloader import train_dataloader
 from environment import DataloaderEnv
+from utils import count_nan_in_weights, count_inf_in_weights
 
 parser = argparse.ArgumentParser(description='PyTorch actor-critic example')
 parser.add_argument('--gamma', type=float, default=0.99, metavar='G',
                     help='discount factor (default: 0.99)')
 args = parser.parse_args()
+
+torch.autograd.set_detect_anomaly(True)
 
 # To run: python3 baseline/full.py
 
@@ -29,8 +32,8 @@ class Encoder(nn.Module):
         # TODO fix code for if weights are not pretrained
         # 166 MB VRAM
         model_base = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
+        # Yields 512 dim vector 
         self.encoder = nn.Sequential(*list(model_base.children())[:-1]).half().to(device) # remove head
-        self.fc = nn.Linear(512, latent_dim).half().to(device)
 
         for param in self.encoder.parameters(): 
             param.requires_grad = False
@@ -42,12 +45,13 @@ class Encoder(nn.Module):
     def forward(self, x): 
         assert torch.min(x).positive() 
         assert not torch.isnan(x).any(), "State contains NaNs in Encoder!"
+        assert not torch.isinf(x).any(), "State contains Infs in Encoder!"
         x = self.encoder(x).squeeze(-1).squeeze(-1)
-        assert not torch.isnan(x).any(), "NaN detected after Encoder encoder!"
-        assert not torch.isinf(x).any(), "Inf detected after Encoder encoder!"
+        assert not torch.isnan(x).any(), "NaN detected after resnet encoder!"
+        assert not torch.isinf(x).any(), "Inf detected after resnet encoder!"
         # print("Min of latent embedding:", torch.min(x), "Max of latent embedding:", torch.max(x), "Nan:", torch.any(torch.isnan(x)), "Inf:", torch.any(torch.isinf(x)))
         # print("Encoder fc:", self.fc.weight)
-        return self.fc(x)
+        return x
 
 # Actor
 class PerturbationModel(nn.Module): 
@@ -61,10 +65,25 @@ class PerturbationModel(nn.Module):
         self.low_rank = low_rank
         self.batch_size = batch_size
 
+        self.downsampled_enc = nn.Sequential(
+            nn.Linear(512, latent_dim), 
+            nn.BatchNorm1d(latent_dim),
+            nn.LeakyReLU(inplace=True)
+        ).half().to(device)
+
         # Gaussian distribution in latent space
-        self.mu = nn.Linear(latent_dim, latent_dim).half().to(device)
-        self.log_std = nn.Linear(latent_dim, latent_dim).half().to(device)
-        self.low_rank_factor = nn.Linear(latent_dim, latent_dim * low_rank).half().to(device)
+        self.mu = nn.Sequential(
+            nn.Linear(latent_dim, latent_dim), 
+            nn.LeakyReLU(inplace=True)
+        ).half().to(device)
+        num_lower_triangular = (latent_dim * (latent_dim + 1)) // 2
+        self.log_cholesky_layer = nn.Sequential(
+            nn.Linear(latent_dim, num_lower_triangular), 
+            nn.LeakyReLU(inplace=True)
+        ).half().to(device)
+        
+        # nn.init.kaiming_uniform_(self.mu.weight, a=5)
+        # nn.init.kaiming_uniform_(self.log_cholesky_layer.weight, a=2)
 
         # 154 MB VRAM for fc and deconv combined
         self.fc = nn.Sequential(
@@ -97,67 +116,124 @@ class PerturbationModel(nn.Module):
 
     # a = pi(s), for latent state s
     def forward(self, x): 
-        # print("Mu min:", torch.min(self.mu.weight), "Max:", torch.max(self.mu.weight), "Nan:", torch.any(torch.isnan(self.mu.weight)), "Inf:", torch.any(torch.isinf(self.mu.weight)))
-        # print("Log std min:", torch.min(self.log_std.weight), "Max:", torch.max(self.log_std.weight), "Nan:", torch.any(torch.isnan(self.log_std.weight)), "Inf:", torch.any(torch.isinf(self.log_std.weight)))
-        # print("Low rank factor min:", torch.min(self.low_rank_factor.weight), "Max:", torch.max(self.low_rank_factor.weight), "Nan:", torch.any(torch.isnan(self.low_rank_factor.weight)), "Inf:", torch.any(torch.isinf(self.low_rank_factor.weight)))
-        # print("x min:", torch.min(x), "Max:", torch.max(x), "Nan:", torch.any(torch.isnan(x)), "Inf:", torch.any(torch.isinf(x)))
+        with torch.autograd.detect_anomaly():
 
-        assert not torch.isnan(x).any(), "NaN detected Perturbation Model 1!"
-        assert not torch.isinf(x).any(), "Inf detected Perturbation Model 1!"
+            assert not torch.isnan(x).any(), "State contains NaNs after Resnet!"
+            assert not torch.isinf(x).any(), "State contains NaNs after Resnet!"
+            print(f"After resnet, min: {torch.min(x)}\tmax: {torch.max(x)}")
 
-        mus = self.mu(x).float()
-        log_std = self.log_std(x).float()
-        log_std = torch.clamp(log_std, min=-5, max=2) # prevent exploding values
-        std = torch.exp(log_std)
-        print(f"Std min: {std.min()}, max: {std.max()}")
-        # print(mus.shape, log_std.shape, std.shape)
-        assert not torch.isnan(mus).any(), "NaN detected Perturbation Model 2!"
-        assert not torch.isinf(log_std).any(), "Inf detected Perturbation Model 2!"
-        assert not torch.isnan(mus).any(), "NaN detected Perturbation Model 3!"
-        assert not torch.isinf(log_std).any(), "Inf detected Perturbation Model 3!"
-        assert not torch.isnan(mus).any(), "NaN detected Perturbation Model 4!"
-        assert not torch.isinf(log_std).any(), "Inf detected Perturbation Model 4!"
+            # print("Mu min:", torch.min(self.mu.weight), "Max:", torch.max(self.mu.weight), "Nan:", torch.any(torch.isnan(self.mu.weight)), "Inf:", torch.any(torch.isinf(self.mu.weight)))
+            # print("Log std min:", torch.min(self.log_std.weight), "Max:", torch.max(self.log_std.weight), "Nan:", torch.any(torch.isnan(self.log_std.weight)), "Inf:", torch.any(torch.isinf(self.log_std.weight)))
+            # print("Low rank factor min:", torch.min(self.low_rank_factor.weight), "Max:", torch.max(self.low_rank_factor.weight), "Nan:", torch.any(torch.isnan(self.low_rank_factor.weight)), "Inf:", torch.any(torch.isinf(self.low_rank_factor.weight)))
+            # print("x min:", torch.min(x), "Max:", torch.max(x), "Nan:", torch.any(torch.isnan(x)), "Inf:", torch.any(torch.isinf(x)))
 
-        diag_cov = torch.diag_embed(std ** 2 + 1e-2)
+            x = self.downsampled_enc(x)
+            assert not torch.isnan(x).any() and not torch.isinf(x).any(), \
+                    f"""NaNs/Infs detected after downsampled encoder fc! {count_nan_in_weights(self.downsampled_enc)} NaNs model, 
+                    {count_inf_in_weights(self.downsampled_enc)} Infs model, 
+                    {torch.sum(torch.isnan(x)).item()} NaNs downsampled, {torch.sum(torch.isinf(x)).item()} Infs downsampled"""
+            # assert not torch.isinf(x).any(), f"Inf detected after downsampled encoder fc! {count_inf_in_weights(self.downsampled_enc)} Infs in model, {torch.sum(torch.isinf(x)).item()} in downsampled" 
 
-        # print(x.shape) 
-        # print(self.low_rank_factor(x).shape)
-        U = self.low_rank_factor(x).view(self.batch_size, self.latent_dim, self.low_rank).float()
-        low_rank_cov = torch.matmul((U * 15), (U * 15).transpose(-1, -2)) # PSD
+            mus = torch.tanh(self.mu(x).float())
 
-        ranks = torch.linalg.matrix_rank(U)
-        print(f"Ranks of U: {ranks}\tDesired rank: {self.low_rank}")
-        # print(diag_cov.shape, U.shape, low_rank_cov.shape)
+            assert not torch.isnan(mus).any() and not torch.isinf(mus).any(), \
+                    f"""NaNs/Infs detected after mu calc! {count_nan_in_weights(self.mu)} NaNs model, 
+                    {count_inf_in_weights(self.mu)} Infs model, 
+                    {torch.sum(torch.isnan(mus)).item()} NaNs calc, {torch.sum(torch.isinf(mus)).item()} Infs calc"""
 
-        print(f"Mean norm of U: {torch.norm(U, dim=[-2, -1]).mean().item()}")
+            # assert not torch.isnan(x).any(), f"NaN detected after mu calc! {self.downsampled_enc.weight}"
+            # assert not torch.isinf(x).any(), f"Inf detected after mu calc! {self.mu.weight}"
 
-        cov_mtxs = diag_cov + low_rank_cov + torch.eye(self.latent_dim, device=x.device) * 2e-1 # for stability
-        cov_mtxs *= 0.1 # For stability
-        print(f"Covs min: {cov_mtxs.min()}, max: {cov_mtxs.max()}, type: {cov_mtxs.dtype}")
+            lower_triang_elts = self.log_cholesky_layer(x).float()
 
-        ranks = torch.linalg.matrix_rank(cov_mtxs)
-        print(f"Ranks of Cov mtxs: {ranks}\tDesired rank: {self.latent_dim}")
+            assert not torch.isnan(lower_triang_elts).any() and not torch.isinf(lower_triang_elts).any(), \
+                    f"""NaNs/Infs detected after cov calc! {count_nan_in_weights(self.log_cholesky_layer)} NaNs model, 
+                    {count_inf_in_weights(self.log_cholesky_layer)} Infs model, 
+                    {torch.sum(torch.isnan(lower_triang_elts)).item()} NaNs calc, {torch.sum(torch.isinf(lower_triang_elts)).item()} Infs calc"""
 
-        eigenvalues = torch.linalg.eigvalsh(cov_mtxs) 
-        print(f"Min eigenvalues: {eigenvalues.min(dim=-1)[0]}")  # Get the minimum eigenvalue per batch
-        assert torch.all(eigenvalues >= 0), "Some covariance matrices are not PSD!"
+            # assert not torch.isnan(x).any(), f"NaN detected after Lower triang covariance calc! {self.log_cholesky_layer.weight}"
+            # assert not torch.isinf(x).any(), f"Inf detected after Lower triang covariance calc! {self.log_cholesky_layer.weight}"
 
-        print(f"Trace of covariance: {cov_mtxs.diagonal(dim1=-2, dim2=-1).sum(dim=-1)}")
+            lower_triang = torch.zeros(self.batch_size, self.latent_dim, self.latent_dim, device=self.device)
 
-        logdet = torch.slogdet(cov_mtxs)
-        print(f"Sign of determinant of covariance matrices: {logdet.sign}\tLog of det: {logdet.logabsdet}")
+            indices = torch.tril_indices(self.latent_dim, self.latent_dim)
+            lower_triang[:, indices[0], indices[1]] = lower_triang_elts
 
-        return mus, cov_mtxs
-    
+            # Exponentiate diagonal elements for stability
+            diag_indices = torch.arange(self.latent_dim, device=self.device)
+            lower_triang[:, diag_indices, diag_indices] = torch.nn.functional.softplus(lower_triang[:, diag_indices, diag_indices]) + 1e-2
+
+            cov_mtxs = torch.matmul(lower_triang, lower_triang.transpose(-1, -2)) + torch.eye(self.latent_dim, device=x.device) * 1e-2
+
+            # log_std = self.log_std(x).float()
+            # log_std = torch.clamp(log_std, min=-5, max=2) # prevent exploding values
+            # std = torch.exp(log_std)
+            # print(f"Std min: {std.min()}, max: {std.max()}")
+            # # print(mus.shape, log_std.shape, std.shape)
+            # assert not torch.isnan(mus).any(), "NaN detected Perturbation Model 2!"
+            # assert not torch.isinf(mus).any(), "Inf detected Perturbation Model 2!"
+            # assert not torch.isnan(mus).any(), "NaN detected Perturbation Model 3!"
+            # assert not torch.isinf(log_std).any(), "Inf detected Perturbation Model 3!"
+            # assert not torch.isnan(mus).any(), "NaN detected Perturbation Model 4!"
+            # assert not torch.isinf(log_std).any(), "Inf detected Perturbation Model 4!"
+
+            # diag_cov = torch.diag_embed(std ** 2 + 1e-2)
+
+            # # print(x.shape) 
+            # # print(self.low_rank_factor(x).shape)
+            # U = self.low_rank_factor(x).view(self.batch_size, self.latent_dim, self.low_rank).float()
+            # low_rank_cov = torch.matmul((U * 15), (U * 15).transpose(-1, -2)) # PSD
+
+            # ranks = torch.linalg.matrix_rank(U)
+            # print(f"Ranks of U: {ranks}\tDesired rank: {self.low_rank}")
+            # # print(diag_cov.shape, U.shape, low_rank_cov.shape)
+
+            # print(f"Mean norm of U: {torch.norm(U, dim=[-2, -1]).mean().item()}")
+
+            # cov_mtxs = diag_cov + low_rank_cov + torch.eye(self.latent_dim, device=x.device) * 2e-1 # for stability
+            # cov_mtxs *= 0.1 # For stability
+            # print(f"Covs min: {cov_mtxs.min()}, max: {cov_mtxs.max()}, type: {cov_mtxs.dtype}")
+
+            # ranks = torch.linalg.matrix_rank(cov_mtxs)
+            # print(f"Ranks of Cov mtxs: {ranks}\tDesired rank: {self.latent_dim}")
+            
+            print(f"Min mu: {torch.min(mus)}\tMax mu: {torch.max(mus)}")
+
+            eigenvalues = torch.linalg.eigvalsh(cov_mtxs) 
+            print(f"Min eigenvalues: {eigenvalues.min(dim=-1)[0]}")  # Get the minimum eigenvalue per batch
+            # assert torch.all(eigenvalues >= 0), "Some covariance matrices are not PSD!"
+
+            print(f"Trace of covariance: {cov_mtxs.diagonal(dim1=-2, dim2=-1).sum(dim=-1)}")
+
+            logdet = torch.slogdet(cov_mtxs)
+            print(f"Sign of determinant of covariance matrices: {logdet.sign}\tLog of det: {logdet.logabsdet}")
+
+
+
+            return x, mus, cov_mtxs
+        
     def decode(self, x):
-        x = self.fc(x)
-        x = x.view(x.size(0), 1024, 15, 15)
-        x = self.deconv(x)
+        with torch.autograd.detect_anomaly():
+            assert not torch.isnan(x).any(), "Latent action contains NaNs!"
+            assert not torch.isinf(x).any(), "Latent action contains Infs!"
 
-        # Alternative
-        # return self.deconv(x.unsqueeze(-1).unsqueeze(-1))  # Add dimensions for ConvTranspose2d
+            x = self.fc(x)
 
-        return x
+            assert not torch.isnan(x).any(), "Upsampled latent action contains NaNs!"
+            assert not torch.isinf(x).any(), "Upsampled latent action contains Infs!"
+
+            x = x.view(x.size(0), 1024, 15, 15)
+            x = self.deconv(x)
+
+            assert not torch.isnan(x).any(), "Deconvolved action contains NaNs!"
+            assert not torch.isinf(x).any(), "Deconvolved action contains Infs!"
+
+            x = torch.clamp(x, min=-1.0, max=1.0)
+
+            # Alternative
+            # return self.deconv(x.unsqueeze(-1).unsqueeze(-1))  # Add dimensions for ConvTranspose2d
+
+            return x
     
     # Bound L2 norm
     def bound_l2(self, perturbation): 
@@ -198,23 +274,36 @@ class Actor_Critic(nn.Module):
     # For actor
     def forward(self, x):
         # Latent vector for image
+        assert not torch.isnan(x).any(), "Original image contains NaNs!"
+        assert not torch.isinf(x).any(), "Original image contains Infs!"
         x = self.feature_encoder(x)
 
-        mus, cov_mtxs = self.actor(x)
+        assert not torch.isnan(x).any(), "Latent image contains NaNs!"
+        assert not torch.isinf(x).any(), "Latent image contains Infs!"
+        x, mus, cov_mtxs = self.actor(x)
+
+        assert not torch.isnan(x).any(), "Downsampled latent image contains NaNs!"
+        assert not torch.isinf(x).any(), "Downsampled latent image contains Infs!"
+
+        assert not torch.isnan(mus).any(), "Mus contain NaNs!"
+        assert not torch.isinf(mus).any(), "Mus contain Infs!"
+
+        assert not torch.isnan(cov_mtxs).any(), "Covs contain NaNs!"
+        assert not torch.isinf(cov_mtxs).any(), "Covs contain Infs!"
 
         return x, mus, cov_mtxs
 
 SavedAction = namedtuple('SavedAction', ['log_prob', 'value'])
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-latent_dim = 128
+latent_dim = 32
 batch_size = 2
 num_episodes = 5
 encoder = Encoder(latent_dim=latent_dim, device=device)
 model = Actor_Critic(encoder=encoder, latent_dim=latent_dim, device=device, batch_size=batch_size)
+torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0, error_if_nonfinite=True)
 # print(model)
-optimizer = optim.Adam(model.parameters(), lr=3e-3)
-torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+optimizer = optim.Adam(model.parameters(), lr=1e-7)
 eps = np.finfo(np.float32).eps.item()
 
 train_data = train_dataloader(batch_size=batch_size)
@@ -301,13 +390,23 @@ def finish_episode():
     # loss /= len(policy_losses)
     print("Loss", loss)
 
+    for name, param in model.named_parameters():
+        if param.grad is not None:
+            print(f"Gradients for {name}:  Max: {param.grad.max()}  Min: {param.grad.min()}  Mean: {param.grad.mean()}")
+            print(f"Num nan: {count_nan_in_weights(param)}\tNum inf: {count_inf_in_weights(param)}")
+            param.grad = torch.clamp(param.grad, min=-1e1, max=1e1)
+            # torch.nn.utils.clip_grad_norm_(param, max_norm=1.0, error_if_nonfinite=False)
+
+
+        # assert not (param.grad is not None and torch.isnan(param.grad).any()), f"NaN detected in gradients of {name}"
+        # assert not (param.grad is not None and torch.isinf(param.grad).any()), f"Inf detected in gradients of {name}"
+
+        # if param.grad is not None: 
+        #     param.grad = torch.clamp(param.grad, min=-1e6, max=1e6)
+    # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0, error_if_nonfinite=True)
+
     # perform backprop
     loss.backward()
-    for name, param in model.named_parameters():
-        if param.grad is not None and torch.isnan(param.grad).any():
-            assert False, f"NaN detected in gradients of {name}"
-        if param.grad is not None and torch.isinf(param.grad).any():
-            assert False, f"Inf detected in gradients of {name}"
     optimizer.step()
 
     # for param in model.parameters():
