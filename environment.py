@@ -20,9 +20,13 @@ class DataloaderEnv(gym.Env):
         sample_state = next(self.dataloader)
         batch_size, *obs_shape = sample_state.shape
 
+        # print(batch_size)
+        # print(obs_shape)
+        # print(sample_state.shape)
+
         # TODO figure this out
-        self.observation_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(sample_state.shape))
-        self.action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(sample_state.shape))
+        self.observation_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(obs_shape))
+        self.action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(obs_shape))
 
     def reset(self): 
         try:
