@@ -10,7 +10,11 @@ from itertools import count
 import sys
 import os
 from ultralytics import YOLO
-from typing import Callable
+from typing import Callable, Optional
+
+import zarr
+from numcodecs import Blosc
+from zarr.codecs import BloscCodec
 
 from stable_baselines3 import SAC
 
@@ -18,7 +22,7 @@ from stable_baselines3.sac.policies import SACPolicy
 from stable_baselines3.common.utils import get_linear_fn
 from stable_baselines3.common.buffers import ReplayBuffer
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
-from stable_baselines3.common.type_aliases import Schedule
+from stable_baselines3.common.type_aliases import Schedule, GymStepReturn, DictReplayBufferSamples
 from stable_baselines3.common.distributions import SquashedDiagGaussianDistribution
 
 
@@ -34,7 +38,7 @@ args = parser.parse_args()
 
 torch.autograd.set_detect_anomaly(True)
 
-# To run: python3 baseline/full.py
+# To run: python3 s_baselines/full.py
 
 class Encoder(nn.Module): 
     def __init__(self, pretrained=True, latent_dim=128, device="cuda"): 
@@ -288,8 +292,8 @@ class CustomSACPolicy(SACPolicy):
     """
     implements both actor and critic in one model
     """
-    def __init__(self, encoder, latent_dim, batch_size, observation_space, action_space, lr_schedule: Callable, replay_buffer=None, curl=None, target_alpha=0.3, device="cuda"):
-        super(CustomSACPolicy, self).__init__(observation_space=observation_space, action_space=action_space, lr_schedule=lambda _: 1e-4)
+    def __init__(self, observation_space, action_space, lr_schedule, encoder, latent_dim, batch_size, device="cuda", **kwargs):
+        super().__init__(observation_space, action_space, lr_schedule)
         self.feature_encoder = encoder
         self.batch_size = batch_size
 
@@ -306,6 +310,49 @@ class CustomSACPolicy(SACPolicy):
 
         self.actor.optimizer = torch.optim.Adam(self.actor.parameters(), lr=1e-4)
         self.critic.optimizer = torch.optim.Adam(self.critic.parameters(), lr=1e-4)
+
+    def forward(self, *args, **kwargs):
+        """
+        Forward pass for SAC policy (actor and critic).
+        
+        :param obs: The input observation.
+        :param deterministic: Whether to use deterministic actions or sample from the action distribution.
+        :return: action, log_prob, Q
+        """
+        obs = args[0]
+        deterministic = args[1] if len(args) > 1 else False
+        print(f"[DEBUG] type(obs): {type(obs)}")
+        print(f"[DEBUG] hasattr(obs, 'shape'): {hasattr(obs, 'shape')}")
+        print(f"[DEBUG] obs: {obs}")
+        
+        if isinstance(obs, np.ndarray):
+            obs_tensor = torch.as_tensor(obs, dtype=torch.float16, device=self.device)
+        # If it's already a tensor, leave it alone
+        elif isinstance(obs, torch.Tensor):
+            obs_tensor = obs.to(self.device)
+        else:
+            raise TypeError(f"Unsupported observation type: {type(obs)}")
+
+        resnet_state = self.feature_encoder(obs_tensor)
+
+        # Actor: Forward pass through the actor network (returns logits for actions)
+        latent_state, mus, cov_mtxs = self.actor(resnet_state)
+
+        # Action distribution: Squashed Gaussian distribution for continuous actions
+        dist = SquashedDiagGaussianDistribution(mus, cov_mtxs)
+
+        # Determine action (deterministic or stochastic)
+        if deterministic:
+            action = dist.get_mean()  # For deterministic action
+        else:
+            action = dist.sample()  # For stochastic action
+
+        half_actions_latent = action.half()
+        combined = torch.cat([latent_state, half_actions_latent], dim=1)
+        # print(half_actions_latent.dtype, combined.dtype)
+        values = self.critic(combined)
+
+        return self.actor.decode(half_actions_latent).squeeze(0), dist.log_prob(action), values
 
     def _predict(self, observation, deterministic = False):
         with torch.no_grad(): 
@@ -331,23 +378,123 @@ class CustomSACPolicy(SACPolicy):
         log_prob = dist.log_prob(actions).sum(dim=-1, keepdim=True)
         return q1, q2, log_prob
     
-# TODO zarr or switch to PPO/GRPO
-class F16ReplayBuffer(ReplayBuffer):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
 
-        # Override the dtype for observations and actions
-        self.observations = self.observations.astype(np.float16)
-        self.next_observations = self.next_observations.astype(np.float16)
-        self.actions = self.actions.astype(np.float16)
+class ZarrReplayBuffer():
+    def __init__(
+        self,
+        buffer_size: int,
+        observation_space,
+        action_space,
+        device: torch.device,
+        store_path: str = "zarr_buffer",
+        dtype: np.dtype = np.float16,
+        compressor: str = "zstd",
+        **kwargs
+    ):
+        # super().__init__(buffer_size, observation_space, action_space, device, **kwargs)
 
+        self.store = zarr.open_group(store_path, mode='w')
 
-def linear_schedule(initial_value):
-    def func(progress_remaining):
-        return progress_remaining * initial_value
-    return func
+        self.device = device
 
-lr_schedule = get_linear_fn(3e-4, end=1e-5, end_fraction=0.1)
+        self.obs_shape = observation_space.shape
+        self.action_shape = action_space.shape
+
+        # compressor = Blosc(cname='zstd', clevel=3, shuffle=Blosc.BITSHUFFLE)
+        compressor = BloscCodec(cname="zstd", clevel=3, shuffle="shuffle")
+        self.pos = 0
+        self.full = False
+
+        self.obs = self.store.create_array(
+            "observations",
+            shape=(buffer_size,) + self.obs_shape,
+            chunks=(1,) + self.obs_shape,
+            dtype=dtype,
+            compressors=compressor
+        )
+        self.next_obs = self.store.create_array(
+            "next_observations",
+            shape=(buffer_size,) + self.obs_shape,
+            chunks=(1,) + self.obs_shape,
+            dtype=dtype,
+            compressors=compressor
+        )
+        self.actions = self.store.create_array(
+            "actions",
+            shape=(buffer_size,) + self.action_shape,
+            chunks=(1,) + self.action_shape,
+            dtype=dtype,
+            compressors=compressor
+        )
+        self.rewards = self.store.create_array(
+            "rewards",
+            shape=(buffer_size,),
+            dtype=dtype, 
+            compressors=compressor
+        )
+        self.dones = self.store.create_array(
+            "dones",
+            shape=(buffer_size,),
+            dtype=np.bool_,
+            compressors=compressor
+        )
+
+    def add(
+        self,
+        obs: np.ndarray,
+        next_obs: np.ndarray,
+        action: np.ndarray,
+        reward: float,
+        done: bool,
+        infos: Optional[GymStepReturn] = None
+    ) -> None:
+        # Normalize data types if needed
+        self.obs[self.pos] = obs.astype(self.obs.dtype)
+        self.next_obs[self.pos] = next_obs.astype(self.next_obs.dtype)
+        self.actions[self.pos] = action.astype(np.float32)
+        self.rewards[self.pos] = np.float16(reward)
+        self.dones[self.pos] = done
+
+        self.pos = (self.pos + 1) % self.buffer_size
+        self.full = self.full or self.pos == 0
+
+    def sample(self, batch_size: int, env=None) -> DictReplayBufferSamples:
+        store = zarr.open(self.store.store, mode="r")  # Open in read-only mode
+        
+        max_idx = self.buffer_size if self.full else self.pos
+        indices = np.random.randint(0, max_idx, size=batch_size)
+
+        # Load and convert to torch
+        obs = torch.tensor(store["observations"][indices], dtype=torch.float16, device=self.device)
+        next_obs = torch.tensor(store["next_observations"][indices], dtype=torch.float16, device=self.device)
+        actions = torch.tensor(store["actions"][indices], dtype=torch.float16, device=self.device)
+        rewards = torch.tensor(store["rewards"][indices], dtype=torch.float16, device=self.device)
+        dones = torch.tensor(store["dones"][indices], dtype=torch.float16, device=self.device)
+
+        return DictReplayBufferSamples(obs, actions, rewards, next_obs, dones)
+    
+class ZarrSAC(SAC):
+    replay_buffer_class = None  # disable internal ReplayBuffer creation
+
+    def _setup_model(self):
+        # Don't call super()._setup_model() directly, it tries to use replay_buffer_class
+        super(SAC, self)._setup_model()  # skip SAC-specific buffer setup
+
+        # Now manually set your custom buffer
+        self.replay_buffer = ZarrReplayBuffer(
+            buffer_size=self.buffer_size,
+            observation_space=self.observation_space,
+            action_space=self.action_space,
+            device=self.device,
+            store_path="zarr_sac_buffer"
+        )
+
+# def linear_schedule(initial_value):
+#     def func(progress_remaining):
+#         return progress_remaining * initial_value
+#     return func
+
+# lr_schedule = get_linear_fn(3e-4, end=1e-5, end_fraction=0.1)
 
     
 # SavedAction = namedtuple('SavedAction', ['log_prob', 'value'])
@@ -361,19 +508,29 @@ obj_detector = YOLO("yolo11n.pt").to(device).eval()
 env = DataloaderEnv(train_data, obj_detector=obj_detector, batch_size=batch_size)
 
 encoder = Encoder(latent_dim=latent_dim, device=device)
-model = CustomSACPolicy(encoder=encoder, latent_dim=latent_dim, batch_size=batch_size, 
-                     observation_space=env.observation_space, action_space=env.action_space, 
-                     device=device, lr_schedule=linear_schedule)
+# model = CustomSACPolicy(encoder=encoder, latent_dim=latent_dim, batch_size=batch_size, 
+#                      observation_space=env.observation_space, action_space=env.action_space, 
+#                      device=device)
 # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0, error_if_nonfinite=True)
 
 # optimizer = optim.Adam(model.parameters(), lr=1e-7)
 # eps = np.finfo(np.float32).eps.item()
 
-model = SAC(
-    policy=model,
+model = ZarrSAC(
+    policy=CustomSACPolicy,
     env=env,
     buffer_size=10_000, 
-    replay_buffer_class=F16ReplayBuffer,
+    policy_kwargs=dict(
+        encoder=encoder,
+        latent_dim=latent_dim,
+        batch_size=batch_size,
+        device=device
+    ),
+    # replay_buffer_class=ZarrReplayBuffer,
+    # replay_buffer_kwargs={
+    #     "store_path": "my_zarr_buffer",
+    #     "compressor": "zstd"
+    # },
     verbose=1,
     tensorboard_log="./sac_custom/",
 )

@@ -28,7 +28,7 @@ class DataloaderEnv(gym.Env):
         self.observation_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(obs_shape))
         self.action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(obs_shape))
 
-    def reset(self): 
+    def reset(self, **kwargs): 
         try:
             self.batch = next(self.dataloader)  # Get next batch (episode)
         except StopIteration:

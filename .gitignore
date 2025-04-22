@@ -9,3 +9,6 @@ __pycache__
 
 # Example files just to see how things work
 examples/
+
+# SAC experience buffer on disk
+zarr_sac_buffer/
