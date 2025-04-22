@@ -38,8 +38,8 @@ class COCODataset(Dataset):
         return img
     
 def display_img(img): 
-    mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).to("cuda") 
-    std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).to("cuda")
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
 
     denormalized_image = (img * std) + mean
 
@@ -51,8 +51,8 @@ def display_img(img):
     plt.show()
 
 def denormalize_batch(images): 
-    mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).to("cuda") 
-    std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).to("cuda")
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
 
     # Denormalize images
     images = images * std + mean
@@ -71,8 +71,8 @@ def display_batch(images, num_rows=2, num_cols=4):
     batch_size, C, H, W = images.shape
 
     # ImageNet normalization stats (modify if using different dataset)
-    mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).to("cuda") 
-    std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).to("cuda")
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1) 
+    std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
 
     # Denormalize images
     images = images * std + mean

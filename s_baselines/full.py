@@ -225,6 +225,9 @@ class PerturbationModel(nn.Module):
 
             return x, mus, cov_mtxs
         
+    def set_training_mode(self, mode: bool):
+        self.train(mode)
+        
     def decode(self, x):
         with torch.autograd.detect_anomaly():
             assert not torch.isnan(x).any(), "Latent action contains NaNs!"
@@ -286,6 +289,9 @@ class Critic(nn.Module):
 
     def forward(self, combined): 
         return self.critic_one(combined), self.critic_two(combined)
+    
+    def set_training_mode(self, mode: bool):
+        self.train(mode)
 
 
 class CustomSACPolicy(SACPolicy):
@@ -301,6 +307,8 @@ class CustomSACPolicy(SACPolicy):
         self.action_space = action_space
 
         self.actor = PerturbationModel(latent_dim, device=device, batch_size=batch_size)
+        assert isinstance(self.actor, nn.Module), "Actor must be nn.Module"
+        assert hasattr(self.actor, "train"), "Actor must have train function"
 
         # Input: concatenated state and action latent vectors
         self.critic = Critic(latent_dim=latent_dim, device=self.device)
@@ -532,7 +540,9 @@ model = ZarrSAC(
     #     "compressor": "zstd"
     # },
     verbose=1,
-    tensorboard_log="./sac_custom/",
+    # tensorboard_log="./sac_custom/",
 )
 
 model.learn(total_timesteps=5)
+
+model.save("Learned.zip")

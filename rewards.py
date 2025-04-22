@@ -180,7 +180,7 @@ def calc_rewards(orig, perturbed, obj_detector, goal, target=None, device="cuda"
     l2_norms = torch.norm(perturbed - orig, p=2, dim=(1, 2, 3))
     # print("L2 norms:", l2_norms)
     # print("Rewards without L2 norm", rewards)
-    rewards_torch = torch.tensor(rewards, device=device) - l2_norms
+    rewards_torch = torch.tensor(rewards) - l2_norms
     dones_torch = torch.tensor(dones)
 
     return rewards_torch, dones_torch

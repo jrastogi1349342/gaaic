@@ -36,11 +36,11 @@ class DataloaderEnv(gym.Env):
             self.batch = next(self.dataloader)
 
         self.step_idx = 0
-        return self.batch.half().to(self.device)
+        return self.batch.half()
     
     # Action: batch_size x 480x480x3
     def step(self, action): 
-        orig_states = self.batch.to(self.device)
+        orig_states = self.batch
         self.step_idx += 1
 
         # print(torch.min(orig_states), torch.max(orig_states))
@@ -55,7 +55,7 @@ class DataloaderEnv(gym.Env):
         reward_batches, done_batches = calc_rewards(orig_denormalized, perturbed_denormalized, self.obj_detector, goal="empty", device=self.device)
 
         # print("Actions", action.shape, action)
-        next_batch = (renormalize_batch(perturbed_denormalized)).half().to(self.device)
+        next_batch = (renormalize_batch(perturbed_denormalized)).half()
 
         done_batches = torch.tensor([True] * self.batch_size) if self.step_idx >= self.max_steps_per_episode else done_batches
 
