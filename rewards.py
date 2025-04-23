@@ -136,8 +136,9 @@ def calc_rewards(orig, perturbed, obj_detector, goal, target=None, device="cuda"
     #     img = to_pil(r)
     #     img.show()
 
-    orig_results = obj_detector(orig)
-    perturbed_results = obj_detector(perturbed)
+    with torch.no_grad(): 
+        orig_results = obj_detector(orig)
+        perturbed_results = obj_detector(perturbed)
 
     # for i, r in enumerate(orig_results):
     #     im_bgr = r.plot()  # BGR-order numpy array
@@ -177,11 +178,11 @@ def calc_rewards(orig, perturbed, obj_detector, goal, target=None, device="cuda"
 
             pass
 
-    l2_norms = torch.norm(perturbed - orig, p=2, dim=(1, 2, 3))
+    l2_norms = np.linalg.norm((perturbed - orig).reshape(len(perturbed), -1), ord=2, axis=1)
     # print("L2 norms:", l2_norms)
     # print("Rewards without L2 norm", rewards)
-    rewards_torch = torch.tensor(rewards) - l2_norms
-    dones_torch = torch.tensor(dones)
+    rewards_torch = np.array(rewards) - l2_norms
+    dones_torch = np.array(dones)
 
     return rewards_torch, dones_torch
 

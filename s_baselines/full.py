@@ -11,6 +11,8 @@ import sys
 import os
 from ultralytics import YOLO
 from typing import Callable, Optional
+from stable_baselines3.common.utils import polyak_update
+from tqdm import trange
 
 import zarr
 from numcodecs import Blosc
@@ -19,6 +21,7 @@ from zarr.codecs import BloscCodec
 from stable_baselines3 import SAC
 
 from stable_baselines3.sac.policies import SACPolicy
+from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv
 from stable_baselines3.common.utils import get_linear_fn
 from stable_baselines3.common.buffers import ReplayBuffer
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
@@ -377,6 +380,24 @@ class CustomSACPolicy(SACPolicy):
 
             return actions.half()
 
+    # Note: observation is already latent vector
+    def predict_action_with_prob(self, observation, deterministic = False):
+        with torch.no_grad(): 
+            # observation = self.feature_encoder(observation)
+
+            observation, mus, cov_mtxs = self.actor(observation)
+            log_prob = None
+            
+            if deterministic: 
+                actions = torch.tanh(mus)
+            else: 
+                dist = torch.distributions.MultivariateNormal(mus, covariance_matrix=cov_mtxs)
+
+                actions = torch.tanh(dist.sample())
+                log_prob = dist.log_prob(actions)
+
+            return actions.half(), log_prob
+
     def evaluate_actions(self, obs, actions): 
         combined = torch.cat([self.feature_encoder(obs), actions.half()], dim=1)
         q1, q2 = self.critic(combined)
@@ -452,19 +473,31 @@ class ZarrReplayBuffer():
         obs: np.ndarray,
         next_obs: np.ndarray,
         action: np.ndarray,
-        reward: float,
-        done: bool,
+        reward: np.ndarray,
+        done: np.ndarray,
         infos: Optional[GymStepReturn] = None
     ) -> None:
-        # Normalize data types if needed
-        self.obs[self.pos] = obs.astype(self.obs.dtype)
-        self.next_obs[self.pos] = next_obs.astype(self.next_obs.dtype)
-        self.actions[self.pos] = action.astype(np.float32)
-        self.rewards[self.pos] = np.float16(reward)
-        self.dones[self.pos] = done
+        # Ensure batch dimension
+        if obs.ndim == len(self.obs_shape):  # single sample
+            obs = np.expand_dims(obs, axis=0)
+            next_obs = np.expand_dims(next_obs, axis=0)
+            action = np.expand_dims(action, axis=0)
+            reward = np.expand_dims(reward, axis=0)
+            done = np.expand_dims(done, axis=0)
 
-        self.pos = (self.pos + 1) % self.buffer_size
-        self.full = self.full or self.pos == 0
+        batch_size = obs.shape[0]
+
+        insert_indices = np.arange(self.pos, self.pos + batch_size) % self.buffer_size
+
+        # Insert using slicing
+        self.obs[insert_indices] = obs.astype(self.obs.dtype)
+        self.next_obs[insert_indices] = next_obs.astype(self.next_obs.dtype)
+        self.actions[insert_indices] = action.astype(np.float32)
+        self.rewards[insert_indices] = reward.astype(np.float16)
+        self.dones[insert_indices] = done.astype(np.bool_)
+
+        self.pos = (self.pos + batch_size) % self.buffer_size
+        self.full = self.full or (self.pos == 0 or self.pos < batch_size)
 
     def sample(self, batch_size: int, env=None) -> DictReplayBufferSamples:
         store = zarr.open(self.store.store, mode="r")  # Open in read-only mode
@@ -497,6 +530,14 @@ class ZarrSAC(SAC):
             store_path="zarr_sac_buffer"
         )
 
+def make_env_fn(dataset, obj_detector, idx):
+    def _init():
+        return DataloaderEnv(dataset, obj_detector, idx, batch_size=1)
+    return _init
+
+def make_vec_env(dataset, obj_detector, num_envs):
+    return DummyVecEnv([make_env_fn(dataset, obj_detector, idx) for idx in range(num_envs)])
+
 # def linear_schedule(initial_value):
 #     def func(progress_remaining):
 #         return progress_remaining * initial_value
@@ -509,11 +550,20 @@ class ZarrSAC(SAC):
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 latent_dim = 32
-batch_size = 2
+batch_size = 1
+num_envs = 2
 num_episodes = 5
-train_data = train_dataloader(batch_size=batch_size)
+train_data = train_dataloader(batch_size=batch_size, num_workers=0)
 obj_detector = YOLO("yolo11n.pt").to(device).eval()
-env = DataloaderEnv(train_data, obj_detector=obj_detector, batch_size=batch_size)
+envs = make_vec_env(train_data, obj_detector, num_envs)
+# DataloaderEnv(train_data, obj_detector=obj_detector, batch_size=batch_size) # TODO consider SubProcEnv
+
+# TODO look at: 
+# Consider SAC envs vs dataloader stuff
+# https://stable-baselines3.readthedocs.io/en/master/guide/vec_envs.html
+# https://stable-baselines3.readthedocs.io/en/master/common/monitor.html
+# https://stable-baselines3.readthedocs.io/en/master/guide/tensorboard.html
+
 
 encoder = Encoder(latent_dim=latent_dim, device=device)
 # model = CustomSACPolicy(encoder=encoder, latent_dim=latent_dim, batch_size=batch_size, 
@@ -526,7 +576,7 @@ encoder = Encoder(latent_dim=latent_dim, device=device)
 
 model = ZarrSAC(
     policy=CustomSACPolicy,
-    env=env,
+    env=envs,
     buffer_size=10_000, 
     policy_kwargs=dict(
         encoder=encoder,
@@ -543,6 +593,78 @@ model = ZarrSAC(
     # tensorboard_log="./sac_custom/",
 )
 
-model.learn(total_timesteps=5)
+# model.learn(total_timesteps=5)
+
+def train_model(
+    envs: DummyVecEnv,
+    policy: CustomSACPolicy,
+    total_timesteps: int = 20,
+    batch_size: int = 32,
+    gradient_updates: int = 1,
+    gamma: float = 0.99,
+    tau: float = 0.005
+):
+    device = policy.device
+    obs = envs.reset()  # (num_envs, C, H, W)
+    obs = torch.tensor(obs, dtype=torch.float16, device=device)
+    num_envs = envs.num_envs
+
+    # TODO manual batching
+
+    replay_buffer = policy.replay_buffer 
+
+    for _ in trange(total_timesteps):
+        with torch.no_grad():
+            actions = policy._predict(obs, deterministic=False)
+
+        next_obs, rewards, dones, infos = envs.step(actions)
+        next_obs = torch.tensor(next_obs, dtype=torch.float16, device=device)
+
+        rewards = torch.tensor(rewards, dtype=torch.float16, device=device).unsqueeze(-1)
+        dones = torch.tensor(dones, dtype=torch.float16, device=device).unsqueeze(-1)
+
+        replay_buffer.add(obs, next_obs, actions, rewards, dones)
+
+        if len(replay_buffer) >= batch_size:
+            for _ in range(gradient_updates):
+                batch = replay_buffer.sample(batch_size)
+
+                with torch.no_grad():
+                    latent_obs = policy.feature_encoder(batch.observations)
+                    latent_next_obs = policy.feature_encoder(batch.next_observations)
+
+                    next_actions, next_log_probs = policy.predict_action_with_prob(latent_next_obs, deterministic=False)
+                    q_next_a, q_next_b = policy.critic_target(torch.cat([latent_next_obs, next_actions]))
+                    q_next = torch.min(q_next_a, q_next_b)
+
+                    target_q = batch.rewards + gamma * (1 - batch.dones) * (q_next - policy.alpha * next_log_probs)
+
+                # Critic update
+                current_q_a, current_q_b = policy.critic(torch.cat([latent_obs, batch.actions]))
+                critic_loss = F.mse_loss(current_q_a, target_q.detach()) + F.mse_loss(current_q_b, target_q.detach())
+
+                policy.critic.optimizer.zero_grad()
+                critic_loss.backward()
+                policy.critic.optimizer.step()
+
+                # Actor update
+                new_actions, log_probs = policy.predict_action_with_prob(latent_obs, deterministic=False)
+                q_new_actions = policy.critic(torch.cat([latent_obs, new_actions]))
+                actor_loss = (policy.alpha * log_probs - q_new_actions).mean()
+
+                policy.actor.optimizer.zero_grad()
+                actor_loss.backward()
+                policy.actor.optimizer.step()
+
+                # Soft update target
+                polyak_update(policy.critic.parameters(), policy.critic_target.parameters(), tau)
+
+        for idx, done in enumerate(dones):
+            if done.item():
+                obs[idx] = torch.tensor(envs.reset_single(idx), dtype=torch.float16, device=device)
+            else:
+                obs[idx] = next_obs[idx]
+
+
 
 model.save("Learned.zip")

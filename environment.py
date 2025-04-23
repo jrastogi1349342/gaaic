@@ -5,7 +5,7 @@ from rewards import calc_rewards
 from dataloader import denormalize_batch, renormalize_batch
 
 class DataloaderEnv(gym.Env): 
-    def __init__(self, dataloader, obj_detector, device="cuda", max_steps_per_episode=1000, batch_size=8, action_shape=(480, 480, 3)): 
+    def __init__(self, dataloader, obj_detector, idx, device="cuda", max_steps_per_episode=1000, batch_size=8, action_shape=(480, 480, 3)): 
         super().__init__
 
         self.dataloader = iter(dataloader)
@@ -16,6 +16,9 @@ class DataloaderEnv(gym.Env):
         self.step_idx = 0 # num steps in current episode
         self.obj_detector = obj_detector
         self.device = device
+        self.info = []
+        self.index = idx
+
 
         sample_state = next(self.dataloader)
         batch_size, *obs_shape = sample_state.shape
@@ -59,8 +62,11 @@ class DataloaderEnv(gym.Env):
 
         done_batches = torch.tensor([True] * self.batch_size) if self.step_idx >= self.max_steps_per_episode else done_batches
 
-        del self.batch
+        # del self.batch
 
         self.batch = next_batch
 
-        return next_batch, reward_batches, done_batches, {}, {}
+        print(next_batch.shape, type(next_batch), reward_batches.shape, type(reward_batches), done_batches.shape, type(done_batches))
+        # self.info[self.step_idx].append
+
+        return next_batch, reward_batches, done_batches, {}
