@@ -379,6 +379,35 @@ class CustomSACPolicy(SACPolicy):
                 actions = torch.tanh(dist.sample())
 
             return actions.half()
+        
+    def pred_upsampled_action(self, observation, deterministic=False): 
+        with torch.no_grad(): 
+
+            resnet_state = self.feature_encoder(observation)
+
+            # Actor: Forward pass through the actor network (returns logits for actions)
+            latent_state, mus, cov_mtxs = self.actor(resnet_state)
+
+            # # Action distribution: Squashed Gaussian distribution for continuous actions
+            # dist = SquashedDiagGaussianDistribution(mus, cov_mtxs)
+
+            # # Determine action (deterministic or stochastic)
+            # if deterministic:
+            #     action = dist.get_mean()  # For deterministic action
+            # else:
+            #     action = dist.sample()  # For stochastic action
+
+            if deterministic: 
+                actions = torch.tanh(mus)
+            else: 
+                dist = torch.distributions.MultivariateNormal(mus, covariance_matrix=cov_mtxs)
+
+                actions = torch.tanh(dist.sample())
+
+
+        half_actions_latent = actions.half()
+
+        return self.actor.decode(half_actions_latent).squeeze(0)
 
     # Note: observation is already latent vector
     def predict_action_with_prob(self, observation, deterministic = False):
@@ -425,6 +454,7 @@ class ZarrReplayBuffer():
         self.store = zarr.open_group(store_path, mode='w')
 
         self.device = device
+        self.buffer_size = buffer_size
 
         self.obs_shape = observation_space.shape
         self.action_shape = action_space.shape
@@ -492,7 +522,7 @@ class ZarrReplayBuffer():
         # Insert using slicing
         self.obs[insert_indices] = obs.astype(self.obs.dtype)
         self.next_obs[insert_indices] = next_obs.astype(self.next_obs.dtype)
-        self.actions[insert_indices] = action.astype(np.float32)
+        self.actions[insert_indices] = action.astype(np.float16)
         self.rewards[insert_indices] = reward.astype(np.float16)
         self.dones[insert_indices] = done.astype(np.bool_)
 
@@ -512,7 +542,10 @@ class ZarrReplayBuffer():
         rewards = torch.tensor(store["rewards"][indices], dtype=torch.float16, device=self.device)
         dones = torch.tensor(store["dones"][indices], dtype=torch.float16, device=self.device)
 
-        return DictReplayBufferSamples(obs, actions, rewards, next_obs, dones)
+        return DictReplayBufferSamples(obs, actions, next_obs, dones, rewards)
+    
+    def length(self): 
+        return self.pos
     
 class ZarrSAC(SAC):
     replay_buffer_class = None  # disable internal ReplayBuffer creation
@@ -581,7 +614,7 @@ model = ZarrSAC(
     policy_kwargs=dict(
         encoder=encoder,
         latent_dim=latent_dim,
-        batch_size=batch_size,
+        batch_size=batch_size * num_envs,
         device=device
     ),
     # replay_buffer_class=ZarrReplayBuffer,
@@ -598,6 +631,7 @@ model = ZarrSAC(
 def train_model(
     envs: DummyVecEnv,
     policy: CustomSACPolicy,
+    replay_buffer, 
     total_timesteps: int = 20,
     batch_size: int = 32,
     gradient_updates: int = 1,
@@ -605,29 +639,37 @@ def train_model(
     tau: float = 0.005
 ):
     device = policy.device
-    obs = envs.reset()  # (num_envs, C, H, W)
-    obs = torch.tensor(obs, dtype=torch.float16, device=device)
+    envs.reset() 
+    # obs, _ = envs.reset()  # (num_envs, C, H, W)
+    # obs = torch.tensor(obs, dtype=torch.float16, device=device)
     num_envs = envs.num_envs
+    print(num_envs)
 
     # TODO manual batching
 
-    replay_buffer = policy.replay_buffer 
-
     for _ in trange(total_timesteps):
+        obs_batch = np.stack([env.batch for env in envs.envs]).squeeze(1)  # (num_envs, C, H, W)
+        obs_tensor = torch.from_numpy(obs_batch).to(policy.device) 
+
         with torch.no_grad():
-            actions = policy._predict(obs, deterministic=False)
+            actions = policy.pred_upsampled_action(obs_tensor, deterministic=False).cpu().numpy()
 
-        next_obs, rewards, dones, infos = envs.step(actions)
-        next_obs = torch.tensor(next_obs, dtype=torch.float16, device=device)
+        next_obs, rewards, dones, _ = envs.step(actions)
+        # obs = obs.cpu()
+        print("Obs and next obs shapes:", obs_batch.shape, next_obs.shape, rewards.shape, dones.shape)
+        # next_obs = torch.tensor(next_obs, dtype=torch.float16, device=device)
 
-        rewards = torch.tensor(rewards, dtype=torch.float16, device=device).unsqueeze(-1)
-        dones = torch.tensor(dones, dtype=torch.float16, device=device).unsqueeze(-1)
+        # rewards = torch.tensor(rewards, dtype=torch.float16, device=device).unsqueeze(-1)
+        # dones = torch.tensor(dones, dtype=torch.float16, device=device).unsqueeze(-1)
 
-        replay_buffer.add(obs, next_obs, actions, rewards, dones)
+        replay_buffer.add(obs_batch, next_obs, actions, rewards, dones)
+        # obs = next_obs
 
-        if len(replay_buffer) >= batch_size:
+        if replay_buffer.length() >= batch_size:
             for _ in range(gradient_updates):
                 batch = replay_buffer.sample(batch_size)
+
+                print(batch.observations.shape, batch.actions.shape, batch.next_observations.shape, batch.dones.shape, batch.rewards.shape)
 
                 with torch.no_grad():
                     latent_obs = policy.feature_encoder(batch.observations)
@@ -661,10 +703,13 @@ def train_model(
 
         for idx, done in enumerate(dones):
             if done.item():
-                obs[idx] = torch.tensor(envs.reset_single(idx), dtype=torch.float16, device=device)
-            else:
-                obs[idx] = next_obs[idx]
+                print(f"Reset env {idx}")
+                envs.env_method("reset", indices=idx)
+            #     obs[idx] = torch.tensor(envs.reset_single(idx), dtype=torch.float16, device=device)
+            # else:
+            #     obs[idx] = next_obs[idx]
 
+train_model(model.env, model.policy, model.replay_buffer)
 
 
 model.save("Learned.zip")

@@ -33,13 +33,13 @@ class DataloaderEnv(gym.Env):
 
     def reset(self, **kwargs): 
         try:
-            self.batch = next(self.dataloader)  # Get next batch (episode)
+            self.batch = next(self.dataloader).half()  # Get next batch (episode)
         except StopIteration:
             self.dataloader = iter(self.dataloader)  # Restart DataLoader
-            self.batch = next(self.dataloader)
+            self.batch = next(self.dataloader).half()
 
         self.step_idx = 0
-        return self.batch.half()
+        return self.batch, {}
     
     # Action: batch_size x 480x480x3
     def step(self, action): 
@@ -66,7 +66,11 @@ class DataloaderEnv(gym.Env):
 
         self.batch = next_batch
 
-        print(next_batch.shape, type(next_batch), reward_batches.shape, type(reward_batches), done_batches.shape, type(done_batches))
+        # print(next_batch.shape, type(next_batch), reward_batches.shape, type(reward_batches), done_batches.shape, type(done_batches))
         # self.info[self.step_idx].append
 
-        return next_batch, reward_batches, done_batches, {}
+        return next_batch, reward_batches, done_batches, {}, {}
+    
+    # def set_result(self, reward, done):
+    #     self.reward = reward
+    #     self.done = done
