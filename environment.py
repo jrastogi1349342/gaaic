@@ -34,10 +34,10 @@ class DataloaderEnv(gym.Env):
 
     def reset(self, **kwargs): 
         try:
-            self.batch = next(self.dataloader).half()  # Get next batch (episode)
+            self.batch = next(self.dataloader)  # Get next batch (episode)
         except StopIteration:
             self.dataloader = iter(self.dataloader)  # Restart DataLoader
-            self.batch = next(self.dataloader).half()
+            self.batch = next(self.dataloader)
 
         self.step_idx = 0
         return self.batch, {}
@@ -59,7 +59,7 @@ class DataloaderEnv(gym.Env):
         reward_batches, done_batches = calc_rewards(orig_denormalized, perturbed_denormalized, self.obj_detector, goal="empty", device=self.device)
 
         # print("Actions", action.shape, action)
-        next_batch = (renormalize_batch(perturbed_denormalized)).half()
+        next_batch = (renormalize_batch(perturbed_denormalized))
 
         done_batches = torch.tensor([True] * self.batch_size) if self.step_idx >= self.max_steps_per_episode else done_batches
 

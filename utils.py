@@ -1,4 +1,5 @@
 import torch
+from torchviz import make_dot
 
 def get_mem_used(): 
     free, total = torch.cuda.mem_get_info("cuda")
@@ -20,3 +21,7 @@ def count_inf_in_weights(model):
             inf_count += torch.isinf(param).sum().item()
     
     return inf_count
+
+def display_comp_graph(output, file_name): 
+    dot = make_dot(output)
+    dot.render(file_name, format="png")

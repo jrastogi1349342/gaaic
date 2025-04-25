@@ -7,3 +7,4 @@ opencv-python
 stable-baselines3
 zarr 
 numcodecs
+torchviz
