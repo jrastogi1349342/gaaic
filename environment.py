@@ -5,7 +5,7 @@ from rewards import calc_rewards
 from dataloader import denormalize_batch, renormalize_batch
 
 class DataloaderEnv(gym.Env): 
-    def __init__(self, dataloader, obj_detector, idx, device="cuda", max_steps_per_episode=1000, batch_size=8, action_shape=(480, 480, 3)): 
+    def __init__(self, dataloader, obj_detector, idx, latent_dim, device="cuda", max_steps_per_episode=1000, batch_size=8, action_shape=(480, 480, 3)): 
         super().__init__
 
         self.dataloader = iter(dataloader)
@@ -18,6 +18,7 @@ class DataloaderEnv(gym.Env):
         self.device = device
         self.info = []
         self.index = idx
+        self.latent_dim = latent_dim
 
 
         sample_state = next(self.dataloader)
@@ -29,7 +30,7 @@ class DataloaderEnv(gym.Env):
 
         # TODO figure this out
         self.observation_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(obs_shape))
-        self.action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(obs_shape))
+        self.action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=((latent_dim, )))
 
     def reset(self, **kwargs): 
         try:

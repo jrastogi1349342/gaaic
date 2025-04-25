@@ -13,6 +13,7 @@ from ultralytics import YOLO
 from typing import Callable, Optional
 from stable_baselines3.common.utils import polyak_update
 from tqdm import trange
+from torch.amp import GradScaler
 
 import zarr
 from numcodecs import Blosc
@@ -152,7 +153,7 @@ class PerturbationModel(nn.Module):
                     {torch.sum(torch.isnan(x)).item()} NaNs downsampled, {torch.sum(torch.isinf(x)).item()} Infs downsampled"""
             # assert not torch.isinf(x).any(), f"Inf detected after downsampled encoder fc! {count_inf_in_weights(self.downsampled_enc)} Infs in model, {torch.sum(torch.isinf(x)).item()} in downsampled" 
 
-            mus = torch.tanh(self.mu(x).float())
+            mus = self.mu(x).float()
 
             assert not torch.isnan(mus).any() and not torch.isinf(mus).any(), \
                     f"""NaNs/Infs detected after mu calc! {count_nan_in_weights(self.mu)} NaNs model, 
@@ -172,7 +173,7 @@ class PerturbationModel(nn.Module):
             # assert not torch.isnan(x).any(), f"NaN detected after Lower triang covariance calc! {self.log_cholesky_layer.weight}"
             # assert not torch.isinf(x).any(), f"Inf detected after Lower triang covariance calc! {self.log_cholesky_layer.weight}"
 
-            lower_triang = torch.zeros(self.batch_size, self.latent_dim, self.latent_dim, device=self.device)
+            lower_triang = torch.zeros(lower_triang_elts.shape[0], self.latent_dim, self.latent_dim, device=self.device)
 
             indices = torch.tril_indices(self.latent_dim, self.latent_dim)
             lower_triang[:, indices[0], indices[1]] = lower_triang_elts
@@ -301,7 +302,7 @@ class CustomSACPolicy(SACPolicy):
     """
     implements both actor and critic in one model
     """
-    def __init__(self, observation_space, action_space, lr_schedule, encoder, latent_dim, batch_size, device="cuda", **kwargs):
+    def __init__(self, observation_space, action_space, lr_schedule, encoder, latent_dim, batch_size, target_entropy=-32.0, device="cuda", **kwargs):
         super().__init__(observation_space, action_space, lr_schedule)
         self.feature_encoder = encoder
         self.batch_size = batch_size
@@ -319,8 +320,14 @@ class CustomSACPolicy(SACPolicy):
 
         self.critic_target.load_state_dict(self.critic.state_dict())
 
+        # TODO implement alpha 
+        self.log_alpha = torch.nn.Parameter(torch.tensor(0.0, requires_grad=True).half())
+
         self.actor.optimizer = torch.optim.Adam(self.actor.parameters(), lr=1e-4)
         self.critic.optimizer = torch.optim.Adam(self.critic.parameters(), lr=1e-4)
+        self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=1e-4)
+
+        self.target_entropy = target_entropy
 
     def forward(self, *args, **kwargs):
         """
@@ -407,25 +414,43 @@ class CustomSACPolicy(SACPolicy):
 
         half_actions_latent = actions.half()
 
-        return self.actor.decode(half_actions_latent).squeeze(0)
+        return half_actions_latent, self.actor.decode(half_actions_latent).squeeze(0)
 
     # Note: observation is already latent vector
     def predict_action_with_prob(self, observation, deterministic = False):
-        with torch.no_grad(): 
-            # observation = self.feature_encoder(observation)
+        # observation = self.feature_encoder(observation)
 
-            observation, mus, cov_mtxs = self.actor(observation)
-            log_prob = None
-            
-            if deterministic: 
-                actions = torch.tanh(mus)
-            else: 
-                dist = torch.distributions.MultivariateNormal(mus, covariance_matrix=cov_mtxs)
+        observation, mus, cov_mtxs = self.actor(observation)
+        log_prob = None
+        
+        if deterministic: 
+            actions = torch.tanh(mus).half()
+        else: 
+            dist = torch.distributions.MultivariateNormal(mus, covariance_matrix=cov_mtxs)
 
-                actions = torch.tanh(dist.sample())
-                log_prob = dist.log_prob(actions)
+            actions = torch.tanh(dist.sample()).half()
+            log_prob = dist.log_prob(actions).half().unsqueeze(1)
 
-            return actions.half(), log_prob
+        return actions, torch.clamp(log_prob, min=-20, max=0)
+
+    # Note: observation is already latent vector
+    def predict_action_with_prob_upsampling(self, observation, deterministic = False):
+        # observation = self.feature_encoder(observation)
+
+        observation, mus, cov_mtxs = self.actor(observation)
+        log_prob = None
+        
+        if deterministic: 
+            actions = torch.tanh(mus).half()
+        else: 
+            dist = torch.distributions.MultivariateNormal(mus, covariance_matrix=cov_mtxs)
+
+            actions = torch.tanh(dist.sample()).half()
+            log_prob = dist.log_prob(actions).half()
+
+        actions_upsampled = self.actor.decode(actions).squeeze(0)
+
+        return actions_upsampled, actions, log_prob.unsqueeze(1)
 
     def evaluate_actions(self, obs, actions): 
         combined = torch.cat([self.feature_encoder(obs), actions.half()], dim=1)
@@ -435,6 +460,10 @@ class CustomSACPolicy(SACPolicy):
         dist = torch.distributions.MultivariateNormal(mu, std)
         log_prob = dist.log_prob(actions).sum(dim=-1, keepdim=True)
         return q1, q2, log_prob
+    
+    @property
+    def alpha(self): 
+        return self.log_alpha.exp()
     
 
 class ZarrReplayBuffer():
@@ -563,13 +592,13 @@ class ZarrSAC(SAC):
             store_path="zarr_sac_buffer"
         )
 
-def make_env_fn(dataset, obj_detector, idx):
+def make_env_fn(dataset, obj_detector, idx, latent_dim):
     def _init():
-        return DataloaderEnv(dataset, obj_detector, idx, batch_size=1)
+        return DataloaderEnv(dataset, obj_detector, idx, latent_dim, batch_size=1)
     return _init
 
-def make_vec_env(dataset, obj_detector, num_envs):
-    return DummyVecEnv([make_env_fn(dataset, obj_detector, idx) for idx in range(num_envs)])
+def make_vec_env(dataset, obj_detector, num_envs, latent_dim):
+    return DummyVecEnv([make_env_fn(dataset, obj_detector, idx, latent_dim) for idx in range(num_envs)])
 
 # def linear_schedule(initial_value):
 #     def func(progress_remaining):
@@ -588,7 +617,7 @@ num_envs = 2
 num_episodes = 5
 train_data = train_dataloader(batch_size=batch_size, num_workers=0)
 obj_detector = YOLO("yolo11n.pt").to(device).eval()
-envs = make_vec_env(train_data, obj_detector, num_envs)
+envs = make_vec_env(train_data, obj_detector, num_envs, latent_dim)
 # DataloaderEnv(train_data, obj_detector=obj_detector, batch_size=batch_size) # TODO consider SubProcEnv
 
 # TODO look at: 
@@ -645,6 +674,8 @@ def train_model(
     num_envs = envs.num_envs
     print(num_envs)
 
+    scaler = GradScaler("cuda")
+
     # TODO manual batching
 
     for _ in trange(total_timesteps):
@@ -652,7 +683,9 @@ def train_model(
         obs_tensor = torch.from_numpy(obs_batch).to(policy.device) 
 
         with torch.no_grad():
-            actions = policy.pred_upsampled_action(obs_tensor, deterministic=False).cpu().numpy()
+            latent_actions, actions = policy.pred_upsampled_action(obs_tensor, deterministic=False)
+            latent_actions = latent_actions.cpu().numpy()
+            actions = actions.cpu().numpy()
 
         next_obs, rewards, dones, _ = envs.step(actions)
         # obs = obs.cpu()
@@ -662,41 +695,65 @@ def train_model(
         # rewards = torch.tensor(rewards, dtype=torch.float16, device=device).unsqueeze(-1)
         # dones = torch.tensor(dones, dtype=torch.float16, device=device).unsqueeze(-1)
 
-        replay_buffer.add(obs_batch, next_obs, actions, rewards, dones)
+        replay_buffer.add(obs_batch, next_obs, latent_actions, rewards, dones)
         # obs = next_obs
 
         if replay_buffer.length() >= batch_size:
             for _ in range(gradient_updates):
                 batch = replay_buffer.sample(batch_size)
 
-                print(batch.observations.shape, batch.actions.shape, batch.next_observations.shape, batch.dones.shape, batch.rewards.shape)
+                # print(batch.observations.shape, batch.actions.shape, batch.next_observations.shape, batch.dones.shape, batch.rewards.shape)
 
                 with torch.no_grad():
                     latent_obs = policy.feature_encoder(batch.observations)
                     latent_next_obs = policy.feature_encoder(batch.next_observations)
 
+                    downsampled_obs = policy.actor.downsampled_enc(latent_obs)
+                    downsampled_next_obs = policy.actor.downsampled_enc(latent_obs)
+
                     next_actions, next_log_probs = policy.predict_action_with_prob(latent_next_obs, deterministic=False)
-                    q_next_a, q_next_b = policy.critic_target(torch.cat([latent_next_obs, next_actions]))
+                    # print(latent_next_obs.shape, next_actions.shape)
+                    q_next_a, q_next_b = policy.critic_target(torch.cat([downsampled_next_obs, next_actions], dim=1))
                     q_next = torch.min(q_next_a, q_next_b)
 
-                    target_q = batch.rewards + gamma * (1 - batch.dones) * (q_next - policy.alpha * next_log_probs)
+                    # print(batch.rewards.unsqueeze(1).dtype, type(gamma), batch.dones.unsqueeze(1).dtype, q_next.dtype, policy.alpha.dtype, next_log_probs.dtype)
 
-                # Critic update
-                current_q_a, current_q_b = policy.critic(torch.cat([latent_obs, batch.actions]))
-                critic_loss = F.mse_loss(current_q_a, target_q.detach()) + F.mse_loss(current_q_b, target_q.detach())
+                    target_q = batch.rewards.unsqueeze(1) + gamma * (1 - batch.dones.unsqueeze(1)) * (q_next - policy.alpha.detach() * next_log_probs)
 
                 policy.critic.optimizer.zero_grad()
-                critic_loss.backward()
-                policy.critic.optimizer.step()
-
-                # Actor update
-                new_actions, log_probs = policy.predict_action_with_prob(latent_obs, deterministic=False)
-                q_new_actions = policy.critic(torch.cat([latent_obs, new_actions]))
-                actor_loss = (policy.alpha * log_probs - q_new_actions).mean()
-
                 policy.actor.optimizer.zero_grad()
-                actor_loss.backward()
-                policy.actor.optimizer.step()
+                policy.alpha_optimizer.zero_grad()
+
+                with torch.autocast(device_type='cuda'): 
+                    # Actor update
+                    new_actions_upsampled, new_actions, log_probs = policy.predict_action_with_prob_upsampling(latent_obs, deterministic=False)
+                    print("obs:", downsampled_obs.min(), downsampled_obs.max(), downsampled_obs.mean())
+                    print("actions:", new_actions.min(), new_actions.max(), new_actions.mean())
+                    q_new_action_a, q_new_action_b = policy.critic(torch.cat([downsampled_obs, new_actions], dim=1))
+                    l2_norm_loss = torch.norm(new_actions_upsampled, p=2, dim=(1, 2, 3)).mean()
+                    # smoothness_loss = # TODO add term to loss function if it applies
+                    actor_loss = (policy.alpha.detach() * log_probs - torch.min(q_new_action_a, q_new_action_b)).mean().to(policy.device)
+
+                    # Critic update
+                    current_q_a, current_q_b = policy.critic(torch.cat([downsampled_obs, batch.actions], dim=1))
+                    critic_loss = F.mse_loss(current_q_a, target_q) + F.mse_loss(current_q_b, target_q)
+                    critic_loss = critic_loss.to(policy.device)
+
+                    # Alpha update
+                    alpha_loss = -(policy.log_alpha * (log_probs.detach() + policy.target_entropy)).mean().to(policy.device)
+
+                # print(target_q.dtype, current_q_a.dtype)
+
+                print(critic_loss, actor_loss, alpha_loss)
+
+                with torch.autograd.set_detect_anomaly(True):
+                    scaler.scale(actor_loss).backward()
+                    scaler.scale(critic_loss).backward()
+                    scaler.scale(alpha_loss).backward()
+
+                scaler.step(policy.critic.optimizer)
+                scaler.step(policy.actor.optimizer)
+                scaler.step(policy.alpha_optimizer)
 
                 # Soft update target
                 polyak_update(policy.critic.parameters(), policy.critic_target.parameters(), tau)
@@ -712,4 +769,4 @@ def train_model(
 train_model(model.env, model.policy, model.replay_buffer)
 
 
-model.save("Learned.zip")
+model.policy.save("Learned.zip")
