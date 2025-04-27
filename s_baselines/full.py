@@ -31,10 +31,12 @@ from stable_baselines3.common.distributions import SquashedDiagGaussianDistribut
 
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from dataloader import train_dataloader, denormalize_batch, renormalize_batch
+from dataloader import train_dataloader, test_dataloader, val_dataloader, denormalize_batch, renormalize_batch
 from environment import DataloaderEnv
 
-from utils import count_nan_in_weights, count_inf_in_weights, display_comp_graph
+from utils import *
+
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
 parser = argparse.ArgumentParser(description='PyTorch actor-critic example')
 parser.add_argument('--gamma', type=float, default=0.99, metavar='G',
@@ -623,14 +625,20 @@ def make_vec_env(dataset, obj_detector, num_envs, latent_dim):
 # SavedAction = namedtuple('SavedAction', ['log_prob', 'value'])
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+gamma = 0.95
 latent_dim = 32
 batch_size = 1 # must be 1, use multiple environments for parallel episodes
 training_batch_size = 64
-num_envs = 8
-num_timesteps = 20
+num_train_envs = 32
+num_timesteps = 1000
 train_data = train_dataloader(batch_size=batch_size, num_workers=0)
 obj_detector = YOLO("yolo11n.pt").to(device).eval()
-envs = make_vec_env(train_data, obj_detector, num_envs, latent_dim)
+train_envs = make_vec_env(train_data, obj_detector, num_train_envs, latent_dim)
+
+num_test_envs = 10
+test_data = test_dataloader(batch_size=batch_size, num_workers=0)
+eval_envs = make_vec_env(test_data, obj_detector, num_test_envs, latent_dim)
+test_freq = 5 # every x timesteps in training
 # DataloaderEnv(train_data, obj_detector=obj_detector, batch_size=batch_size) # TODO consider SubProcEnv
 
 # TODO look at: 
@@ -651,12 +659,12 @@ encoder = Encoder(latent_dim=latent_dim, device=device)
 
 model = ZarrSAC(
     policy=CustomSACPolicy,
-    env=envs,
+    env=train_envs,
     buffer_size=10_000, 
     policy_kwargs=dict(
         encoder=encoder,
         latent_dim=latent_dim,
-        batch_size=batch_size * num_envs,
+        batch_size=batch_size * num_train_envs,
         device=device
     ),
     # replay_buffer_class=ZarrReplayBuffer,
@@ -669,23 +677,73 @@ model = ZarrSAC(
 )
 
 # TODO write this
-def rollout(): 
+def rollout(
+    envs: DummyVecEnv, 
+    policy: CustomSACPolicy,
+    gamma: float,
+    max_steps: int = 50, 
+): 
+    envs.reset()
 
-    pass
+    total_rewards = np.zeros((envs.num_envs))
+    step_num = 0
+    curr_gamma = gamma
+
+    while True:
+        obs_batch = np.stack([env.batch for env in envs.envs]).squeeze(1)  # (num_envs, C, H, W)
+        obs_tensor = torch.from_numpy(obs_batch).to(policy.device) 
+
+        with torch.no_grad():
+            _, actions = policy.pred_upsampled_action(obs_tensor, deterministic=True)
+        
+        # latent_actions = latent_actions.cpu().numpy()
+        actions_npy = actions.cpu().numpy()
+
+        perturbed_normalized_to_s = obs_tensor + actions # not [0,1]
+
+        orig_denormalized = denormalize_batch(obs_tensor) # [0,1] range
+        perturbed_denormalized = denormalize_batch(perturbed_normalized_to_s) # [0,1] range
+
+        perturbed_normalized_clamp = renormalize_batch(perturbed_denormalized).cpu()
+    
+        with torch.no_grad():
+            orig_results = obj_detector(orig_denormalized, verbose=False)
+            perturbed_results = obj_detector(perturbed_denormalized, verbose=False)
+
+        for i, env in enumerate(envs.envs):
+            if step_num == 0: 
+                env.set_results(perturbed_normalized_clamp[i], orig_results[i], perturbed_results[i], False)
+            else: 
+                env.set_results(perturbed_normalized_clamp[i], orig_results[i], perturbed_results[i], dones[i])
+
+        _, rewards, dones, _ = envs.step(actions_npy)
+        total_rewards += curr_gamma * rewards
+        curr_gamma *= gamma
+
+        step_num += 1
+
+        if step_num > max_steps or all(dones): 
+            break
+        
+    return total_rewards.mean()
 
 # model.learn(total_timesteps=5)
 
 def train_model(
-    envs: DummyVecEnv,
+    train_envs: DummyVecEnv,
+    test_envs: DummyVecEnv, 
     policy: CustomSACPolicy,
     replay_buffer, 
     total_timesteps: int = 20,
     batch_size: int = 32,
     gradient_updates: int = 1,
     gamma: float = 0.95,
-    tau: float = 0.005
+    tau: float = 0.005, 
+    test_freq: float = 5, 
+    visualize_lc: bool = True
 ):
-    envs.reset() 
+    train_envs.reset() 
+    avg_rewards = []
     # obs, _ = envs.reset()  # (num_envs, C, H, W)
     # obs = torch.tensor(obs, dtype=torch.float16, device=device)
     # num_envs = envs.num_envs
@@ -693,10 +751,8 @@ def train_model(
 
     # scaler = GradScaler("cuda")
 
-    # TODO finish manual batching for YOLO 
-
     for i in trange(total_timesteps):
-        obs_batch = np.stack([env.batch for env in envs.envs]).squeeze(1)  # (num_envs, C, H, W)
+        obs_batch = np.stack([env.batch for env in train_envs.envs]).squeeze(1)  # (num_envs, C, H, W)
         obs_tensor = torch.from_numpy(obs_batch).to(policy.device) 
 
         with torch.no_grad():
@@ -719,10 +775,10 @@ def train_model(
             orig_results = obj_detector(orig_denormalized, verbose=False)
             perturbed_results = obj_detector(perturbed_denormalized, verbose=False)
 
-        for i, env in enumerate(envs.envs):
-            env.set_results(perturbed_normalized_clamp[i], orig_results[i], perturbed_results[i])
+        for j, env in enumerate(train_envs.envs):
+            env.set_results(perturbed_normalized_clamp[j], orig_results[j], perturbed_results[j])
 
-        next_obs, rewards, dones, _ = envs.step(actions_npy)
+        next_obs, rewards, dones, _ = train_envs.step(actions_npy)
         # obs = obs.cpu()
         # print("Obs and next obs shapes:", obs_batch.shape, next_obs.shape, rewards.shape, dones.shape)
         # next_obs = torch.tensor(next_obs, dtype=torch.float16, device=device)
@@ -825,12 +881,21 @@ def train_model(
         for idx, done in enumerate(dones):
             if done.item():
                 # print(f"Reset env {idx}")
-                envs.env_method("reset", indices=idx)
+                train_envs.env_method("reset", indices=idx)
             #     obs[idx] = torch.tensor(envs.reset_single(idx), dtype=torch.float16, device=device)
             # else:
             #     obs[idx] = next_obs[idx]
 
-train_model(model.env, model.policy, model.replay_buffer, total_timesteps=num_timesteps, batch_size=training_batch_size)
+        if i % test_freq == 0: 
+            rollout_val = rollout(test_envs, policy, gamma)
+            # print(f"Running rollout: {rollout_val}")
+            avg_rewards.append(rollout_val)
+
+    if visualize_lc: 
+        plot_learning_curve(avg_rewards, test_freq)
+
+# 1000 timesteps, 16 envs, batch size 64 takes 1.5 hrs to run
+train_model(model.env, eval_envs, model.policy, model.replay_buffer, total_timesteps=num_timesteps, batch_size=training_batch_size, gamma=gamma, test_freq=test_freq)
 
 
 model.policy.save("Learned.zip")

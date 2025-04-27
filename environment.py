@@ -14,6 +14,7 @@ class DataloaderEnv(gym.Env):
         self.orig_yolo = None
         self.perturbed_yolo = None
         self.next_batch = None
+        self.done = None
         self.batch_size = batch_size 
         self.max_steps_per_episode = max_steps_per_episode
         self.step_idx = 0 # num steps in current episode
@@ -71,23 +72,25 @@ class DataloaderEnv(gym.Env):
             # del self.batch
 
         else: 
-            reward_batches, done_batches = calc_rewards(orig_states, self.next_batch, self.orig_yolo, self.perturbed_yolo, goal="empty", device=self.device)
+            reward_batches, done_batches = calc_rewards(orig_states, self.next_batch, self.orig_yolo, self.perturbed_yolo, done=self.done, goal="empty", device=self.device)
 
             self.batch = self.next_batch
 
             self.orig_yolo = None
             self.perturbed_yolo = None
             self.next_batch = None
+            self.done = None
 
         # print(next_batch.shape, type(next_batch), reward_batches.shape, type(reward_batches), done_batches.shape, type(done_batches))
         # self.info[self.step_idx].append
 
         return self.batch, reward_batches, done_batches, {}, {}
-    
-    def set_results(self, next_batch, orig_yolo, perturbed_yolo):
+
+    def set_results(self, next_batch, orig_yolo, perturbed_yolo, done=None):
         self.next_batch = next_batch.unsqueeze(0)
         self.orig_yolo = orig_yolo
         self.perturbed_yolo = perturbed_yolo
+        self.done = done
     
     # def set_result(self, reward, done):
     #     self.reward = reward

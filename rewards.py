@@ -186,11 +186,16 @@ def calc_rewards(orig, perturbed, obj_detector, goal, target=None, device="cuda"
 
     return rewards_torch, dones_torch
 
-def calc_rewards(orig, perturbed, orig_results, perturbed_results, goal, target=None, device="cuda"): 
+def calc_rewards(orig, perturbed, orig_results, perturbed_results, goal, done=None, target=None, device="cuda"): 
     assert goal in {"empty", "untargeted", "targeted"}, f"Goal {goal} not found"
 
-    rewards = [0]
-    dones = [False]
+    rewards = np.array([0.0])
+    dones = np.array([False])
+
+    if done == True: 
+        # print("Early return")
+        dones[0] = True
+        return rewards, dones
 
     # TODO plot images to verify ranges and that yolo worked properly
 
@@ -247,12 +252,12 @@ def calc_rewards(orig, perturbed, orig_results, perturbed_results, goal, target=
     l2_norms = np.linalg.norm((perturbed - orig).reshape(len(perturbed), -1), ord=2, axis=1)
     # print("L2 norms:", l2_norms)
     # print("Rewards without L2 norm", rewards)
-    rewards_torch = np.array(rewards) - l2_norms
-    dones_torch = np.array(dones)
+    rewards -= l2_norms
+    # dones_torch = np.array(dones)
 
     # print(rewards_torch, dones_torch)
 
-    return rewards_torch, dones_torch
+    return rewards, dones
 
 # boxes_A = torch.tensor([
 #     [50, 80, 180, 220],

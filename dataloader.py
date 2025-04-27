@@ -93,22 +93,23 @@ def display_batch(images, num_rows=2, num_cols=4):
     plt.tight_layout()
     plt.show()
 
-def form_dataloader(name, batch_size=8, num_workers=4, pin_memory=True): 
-    dataset = COCODataset(os.path.join(COCO_DIR, f"{name}2017.txt"), 
-                          os.path.join(COCO_DIR, f"images/{name}2017"))
+def form_dataloader(img_name, path_name, batch_size=8, num_workers=4, pin_memory=True): 
+    dataset = COCODataset(os.path.join(COCO_DIR, f"{img_name}2017.txt"), 
+                          os.path.join(COCO_DIR, f"images/{path_name}2017"))
     return DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=pin_memory)
 
 def train_dataloader(batch_size=8, num_workers=4, pin_memory=True): 
     name = "train"
-    return form_dataloader(name, batch_size=batch_size, num_workers=num_workers, pin_memory=pin_memory)
+    return form_dataloader(name, name, batch_size=batch_size, num_workers=num_workers, pin_memory=pin_memory)
 
 def val_dataloader(batch_size=8, num_workers=4, pin_memory=True): 
     name = "val"
-    return form_dataloader(name, batch_size=batch_size, num_workers=num_workers, pin_memory=pin_memory)
+    return form_dataloader(name, name, batch_size=batch_size, num_workers=num_workers, pin_memory=pin_memory)
 
 def test_dataloader(batch_size=8, num_workers=4, pin_memory=True): 
-    name = "test-dev2017"
-    return form_dataloader(name, batch_size=batch_size, num_workers=num_workers, pin_memory=pin_memory)
+    img_name = "test-dev"
+    path_name = "test"
+    return form_dataloader(img_name, path_name, batch_size=batch_size, num_workers=num_workers, pin_memory=pin_memory)
 
 # train_loader = train_dataloader()
 # if train_loader: 
