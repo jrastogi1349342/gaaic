@@ -11,6 +11,9 @@ class DataloaderEnv(gym.Env):
         self.dataloader = iter(dataloader)
         self.action_shape = action_shape
         self.batch = None
+        self.orig_yolo = None
+        self.perturbed_yolo = None
+        self.next_batch = None
         self.batch_size = batch_size 
         self.max_steps_per_episode = max_steps_per_episode
         self.step_idx = 0 # num steps in current episode
@@ -47,30 +50,44 @@ class DataloaderEnv(gym.Env):
         orig_states = self.batch
         self.step_idx += 1
 
-        # print(torch.min(orig_states), torch.max(orig_states))
+        if self.orig_yolo == None: 
+            print("A")
+            # print(torch.min(orig_states), torch.max(orig_states))
 
-        # Add action (480x480x3) noise image to each state in batch
-        perturbed_normalized_to_s = orig_states + action
+            # Add action (480x480x3) noise image to each state in batch
+            perturbed_normalized_to_s = orig_states + action
 
-        orig_denormalized = denormalize_batch(orig_states)
-        perturbed_denormalized = denormalize_batch(perturbed_normalized_to_s)
+            orig_denormalized = denormalize_batch(orig_states) # [0,1]
+            perturbed_denormalized = denormalize_batch(perturbed_normalized_to_s) # [0,1]
 
-        # TODO implement reward function
-        reward_batches, done_batches = calc_rewards(orig_denormalized, perturbed_denormalized, self.obj_detector, goal="empty", device=self.device)
+            # TODO implement reward function
+            reward_batches, done_batches = calc_rewards(orig_denormalized, perturbed_denormalized, self.obj_detector, goal="empty", device=self.device)
 
-        # print("Actions", action.shape, action)
-        next_batch = (renormalize_batch(perturbed_denormalized))
+            # print("Actions", action.shape, action)
+            self.batch = (renormalize_batch(perturbed_denormalized)) # next batch
 
-        done_batches = torch.tensor([True] * self.batch_size) if self.step_idx >= self.max_steps_per_episode else done_batches
+            done_batches = torch.tensor([True] * self.batch_size) if self.step_idx >= self.max_steps_per_episode else done_batches
 
-        # del self.batch
+            # del self.batch
 
-        self.batch = next_batch
+        else: 
+            reward_batches, done_batches = calc_rewards(orig_states, self.next_batch, self.orig_yolo, self.perturbed_yolo, goal="empty", device=self.device)
+
+            self.batch = self.next_batch
+
+            self.orig_yolo = None
+            self.perturbed_yolo = None
+            self.next_batch = None
 
         # print(next_batch.shape, type(next_batch), reward_batches.shape, type(reward_batches), done_batches.shape, type(done_batches))
         # self.info[self.step_idx].append
 
-        return next_batch, reward_batches, done_batches, {}, {}
+        return self.batch, reward_batches, done_batches, {}, {}
+    
+    def set_results(self, next_batch, orig_yolo, perturbed_yolo):
+        self.next_batch = next_batch.unsqueeze(0)
+        self.orig_yolo = orig_yolo
+        self.perturbed_yolo = perturbed_yolo
     
     # def set_result(self, reward, done):
     #     self.reward = reward

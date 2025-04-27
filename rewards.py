@@ -186,6 +186,73 @@ def calc_rewards(orig, perturbed, obj_detector, goal, target=None, device="cuda"
 
     return rewards_torch, dones_torch
 
+def calc_rewards(orig, perturbed, orig_results, perturbed_results, goal, target=None, device="cuda"): 
+    assert goal in {"empty", "untargeted", "targeted"}, f"Goal {goal} not found"
+
+    rewards = [0]
+    dones = [False]
+
+    # TODO plot images to verify ranges and that yolo worked properly
+
+    # to_pil = ToPILImage()
+    # for i, r in enumerate(orig):
+    #     img = to_pil(r)
+    #     img.show()
+
+    # for i, r in enumerate(perturbed):
+    #     img = to_pil(r)
+    #     img.show()
+
+    # for i, r in enumerate(orig_results):
+    #     im_bgr = r.plot()  # BGR-order numpy array
+    #     r.show()
+
+    # for i, r in enumerate(perturbed_result):
+    #     im_bgr = r.plot()  # BGR-order numpy array
+    #     r.show()
+
+    # print(orig_results.shape)
+
+    orig_result = orig_results.boxes
+    perturbed_result = perturbed_results.boxes
+
+    if len(perturbed_result) == 0: 
+        dones[0] = True
+
+    same_det, same_spot_diff_cls, diff_spot_same_cls, diff_spot_diff_cls, removed, added = associate(orig_result, perturbed_result)
+
+    # TODO normalize by number of detected objects 
+    if goal == "empty": 
+        # TODO rewamp this reward system, prof said to bring rewards down
+        rewards[0] = -50 * same_det + -25 * same_spot_diff_cls + -15 * diff_spot_same_cls + -15 * diff_spot_diff_cls + 50 * removed + -50 * added
+        sum = same_det + same_spot_diff_cls + diff_spot_same_cls + diff_spot_diff_cls + removed + added
+        if sum != 0: 
+            rewards[0] /= sum
+        else: 
+            rewards[0] -= 200 
+
+        pass
+
+    # TODO implement
+    elif goal == "untargeted": 
+
+        pass
+    else: 
+        assert target is not None, f"Target should be dictionary mapping from original class pred to desired class pred"
+
+        pass
+
+    # print(perturbed.shape, orig.shape)
+
+    l2_norms = np.linalg.norm((perturbed - orig).reshape(len(perturbed), -1), ord=2, axis=1)
+    # print("L2 norms:", l2_norms)
+    # print("Rewards without L2 norm", rewards)
+    rewards_torch = np.array(rewards) - l2_norms
+    dones_torch = np.array(dones)
+
+    # print(rewards_torch, dones_torch)
+
+    return rewards_torch, dones_torch
 
 # boxes_A = torch.tensor([
 #     [50, 80, 180, 220],
