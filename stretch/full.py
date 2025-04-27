@@ -14,6 +14,7 @@ from typing import Callable, Optional
 from stable_baselines3.common.utils import polyak_update
 from tqdm import trange
 from torch.amp import GradScaler
+import time
 
 import zarr
 from numcodecs import Blosc
@@ -45,7 +46,7 @@ args = parser.parse_args()
 
 # torch.autograd.set_detect_anomaly(True)
 
-# To run: python3 s_baselines/full.py
+# To run: python3 stretch/full.py
 
 class Encoder(nn.Module): 
     def __init__(self, pretrained=True, latent_dim=128, device="cuda"): 
@@ -898,4 +899,4 @@ def train_model(
 train_model(model.env, eval_envs, model.policy, model.replay_buffer, total_timesteps=num_timesteps, batch_size=training_batch_size, gamma=gamma, test_freq=test_freq)
 
 
-model.policy.save("Learned.zip")
+model.policy.save(f"Learned_{time.time()}.zip")
