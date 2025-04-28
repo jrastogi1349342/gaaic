@@ -13,8 +13,8 @@ examples/
 # SAC experience buffer on disk
 zarr_sac_buffer/
 
-# Learned model
-Learned.zip
+# Learned models
+Learned*.zip
 
 # Computation graphs
 *.png

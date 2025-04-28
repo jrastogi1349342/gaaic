@@ -594,6 +594,22 @@ class ZarrReplayBuffer():
 class ZarrSAC(SAC):
     replay_buffer_class = None  # disable internal ReplayBuffer creation
 
+    def __init__(self, *args, **kwargs):
+        super(ZarrSAC, self).__init__(*args, **kwargs)
+
+        # Ensure that ent_coef_tensor is initialized
+        if not hasattr(self, 'ent_coef_tensor'):
+            self.ent_coef_tensor = self.policy.alpha
+
+        if not hasattr(self, 'actor'):
+            self.actor = self.policy.actor  # Use the policy's actor
+        if not hasattr(self, 'critic'):
+            self.critic = self.policy.critic  # Use the policy's critic
+        if not hasattr(self, 'target_critic'):
+            self.target_critic = self.policy.critic_target  # Use the policy's target critic
+        if not hasattr(self, 'ent_coef_optimizer'):
+            self.ent_coef_optimizer = self.policy.alpha_optimizer
+
     def _setup_model(self):
         # Don't call super()._setup_model() directly, it tries to use replay_buffer_class
         super(SAC, self)._setup_model()  # skip SAC-specific buffer setup
@@ -606,6 +622,80 @@ class ZarrSAC(SAC):
             device=self.device,
             store_path="zarr_sac_buffer"
         )
+
+    def save(self, path, **kwargs):
+        save_dict = {
+            'actor': self.actor.state_dict(),
+            'critic': self.critic.state_dict(),
+            'critic_target': self.target_critic.state_dict(),
+            'alpha': self.policy.log_alpha,
+            'ent_coef_tensor': self.ent_coef_tensor,
+            'actor_optimizer': self.actor.optimizer.state_dict(),
+            'critic_optimizer': self.critic.optimizer.state_dict(),
+            'alpha_optimizer': self.policy.alpha_optimizer.state_dict(),
+        }
+
+        # Save to the path
+        torch.save(save_dict, path)
+
+
+
+        # # Before saving, ensure the ent_coef_tensor exists
+        # if not hasattr(self, 'ent_coef_tensor'):
+        #     self.ent_coef_tensor = self.policy.log_alpha
+
+        # if not hasattr(self, 'actor'):
+        #     self.actor = self.policy.actor  # Use the policy's actor
+        # if not hasattr(self, 'critic'):
+        #     self.critic = self.policy.critic  # Use the policy's critic
+        # if not hasattr(self, 'target_critic'):
+        #     self.target_critic = self.policy.critic_target  # Use the policy's target critic
+        # if not hasattr(self, 'ent_coef_optimizer'):
+        #     self.ent_coef_optimizer = self.policy.alpha_optimizer
+
+        
+        # # Call the original save method from SAC
+        # super(ZarrSAC, self).save(path, **kwargs)
+
+    def load(self, path, env=None):
+        state_dict = torch.load(path)
+
+        # Load the parameters for actor, critic, target critic, and alpha
+        self.actor.load_state_dict(state_dict['actor'])
+        self.critic.load_state_dict(state_dict['critic'])
+        self.target_critic.load_state_dict(state_dict['critic_target'])
+        self.policy.log_alpha = state_dict['alpha']
+        self.ent_coef_tensor = state_dict['ent_coef_tensor']
+        
+        # Load optimizers
+        self.actor.optimizer.load_state_dict(state_dict['actor_optimizer'])
+        self.critic.optimizer.load_state_dict(state_dict['critic_optimizer'])
+        self.policy.alpha_optimizer.load_state_dict(state_dict['alpha_optimizer'])
+
+        # super(ZarrSAC, self).load(path, env)
+
+        return self
+
+
+        # # Custom load logic if needed
+        # model = super(ZarrSAC, self).load(path, env=env)
+        
+        # # Ensure that ent_coef_tensor is loaded
+        # if not hasattr(model, 'ent_coef_tensor'):
+        #     model.ent_coef_tensor = self.alpha
+
+        # if not hasattr(self, 'actor'):
+        #     self.actor = self.policy.actor  # Use the policy's actor
+        # if not hasattr(self, 'critic'):
+        #     self.critic = self.policy.critic  # Use the policy's critic
+        # if not hasattr(self, 'target_critic'):
+        #     self.target_critic = self.policy.critic_target  # Use the policy's target critic
+        # if not hasattr(self, 'ent_coef_optimizer'):
+        #     self.ent_coef_optimizer = self.policy.alpha_optimizer
+
+
+        # return model
+
 
 def make_env_fn(dataset, obj_detector, idx, latent_dim):
     def _init():
@@ -631,7 +721,7 @@ latent_dim = 32
 batch_size = 1 # must be 1, use multiple environments for parallel episodes
 training_batch_size = 64
 num_train_envs = 32
-num_timesteps = 1000
+num_timesteps = 10
 train_data = train_dataloader(batch_size=batch_size, num_workers=0)
 obj_detector = YOLO("yolo11n.pt").to(device).eval()
 train_envs = make_vec_env(train_data, obj_detector, num_train_envs, latent_dim)
@@ -677,7 +767,6 @@ model = ZarrSAC(
     # tensorboard_log="./sac_custom/",
 )
 
-# TODO write this
 def rollout(
     envs: DummyVecEnv, 
     policy: CustomSACPolicy,
@@ -896,7 +985,42 @@ def train_model(
         plot_learning_curve(avg_rewards, test_freq)
 
 # 1000 timesteps, 16 envs, batch size 64 takes 1.5 hrs to run
-train_model(model.env, eval_envs, model.policy, model.replay_buffer, total_timesteps=num_timesteps, batch_size=training_batch_size, gamma=gamma, test_freq=test_freq)
+# train_model(model.env, eval_envs, model.policy, model.replay_buffer, total_timesteps=num_timesteps, batch_size=training_batch_size, gamma=gamma, test_freq=test_freq)
 
+time_save = time.time()
 
-model.policy.save(f"Learned_{time.time()}.zip")
+# Save full model, not just policy
+# model.save(f"Learned_{time_save}.zip")
+
+# TODO delete when eval confirmed to work
+# del model # remove to demonstrate saving and loading
+
+# model = ZarrSAC(
+#     policy=CustomSACPolicy,
+#     env=train_envs,
+#     buffer_size=10_000, 
+#     policy_kwargs=dict(
+#         encoder=encoder,
+#         latent_dim=latent_dim,
+#         batch_size=batch_size * num_train_envs,
+#         device=device
+#     ),
+#     # replay_buffer_class=ZarrReplayBuffer,
+#     # replay_buffer_kwargs={
+#     #     "store_path": "my_zarr_buffer",
+#     #     "compressor": "zstd"
+#     # },
+#     verbose=1,
+#     # tensorboard_log="./sac_custom/",
+# )
+
+# model.load(f"Learned_{time_save}.zip")
+
+# model.env.reset()
+
+# obs_batch = np.stack([env.batch for env in model.env.envs]).squeeze(1)  # (num_envs, C, H, W)
+# obs_tensor = torch.from_numpy(obs_batch).to(model.policy.device) 
+
+# with torch.no_grad():
+#     _, actions = model.policy.pred_upsampled_action(obs_tensor, deterministic=True)
+# print(actions.shape)
