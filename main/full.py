@@ -46,9 +46,8 @@ args = parser.parse_args()
 
 # torch.autograd.set_detect_anomaly(True)
 
-# To run: python3 stretch/full.py
+# To run: python3 main/full.py
 
-# TODO verify images have been normalized with mean = [0.485, 0.456, 0.406] and std = [0.229, 0.224, 0.225]
 class Encoder(nn.Module): 
     def __init__(self, pretrained=True, latent_dim=128, device="cuda"): 
         super().__init__()
@@ -67,7 +66,6 @@ class Encoder(nn.Module):
                 module.train()
 
     def forward(self, x): 
-        # assert not torch.min(x).negative() # TODO check, this should be activating frequently
         assert not torch.isnan(x).any(), "State contains NaNs in Encoder!"
         assert not torch.isinf(x).any(), "State contains Infs in Encoder!"
         x = self.encoder(x).squeeze(-1).squeeze(-1)
@@ -111,8 +109,8 @@ class PerturbationModel(nn.Module):
 
         # 154 MB VRAM for fc and deconv combined
         self.fc = nn.Sequential(
-            nn.Linear(latent_dim, 1024 * 15 * 15), 
-            nn.BatchNorm1d(1024 * 15 * 15),
+            nn.Linear(latent_dim, 1024 * 7 * 7), 
+            nn.BatchNorm1d(1024 * 7 * 7),
             nn.ReLU(inplace=True)
         ).to(device)
 
@@ -255,7 +253,7 @@ class PerturbationModel(nn.Module):
         assert not torch.isnan(x).any(), "Upsampled latent action contains NaNs!"
         assert not torch.isinf(x).any(), "Upsampled latent action contains Infs!"
 
-        x = x.view(x.size(0), 1024, 15, 15)
+        x = x.view(x.size(0), 1024, 7, 7)
         x = self.deconv(x)
 
         assert not torch.isnan(x).any(), "Deconvolved action contains NaNs!"
@@ -333,6 +331,7 @@ class CustomSACPolicy(SACPolicy):
 
         self.critic_target.load_state_dict(self.critic.state_dict())
 
+        # TODO implement alpha 
         self.log_alpha = torch.nn.Parameter(torch.tensor(0.0, requires_grad=True))
 
         self.actor.optimizer = torch.optim.Adam(self.actor.parameters(), lr=1e-4)
@@ -363,6 +362,7 @@ class CustomSACPolicy(SACPolicy):
         else:
             raise TypeError(f"Unsupported observation type: {type(obs)}")
 
+        # print(f"367: {torch.min(obs_tensor)}, {torch.max(obs_tensor)}")
         resnet_state = self.feature_encoder(obs_tensor)
 
         # Actor: Forward pass through the actor network (returns logits for actions)
@@ -389,6 +389,7 @@ class CustomSACPolicy(SACPolicy):
 
     def _predict(self, observation, deterministic = False):
         with torch.no_grad(): 
+            # print(f"394: {torch.min(observation)}, {torch.max(observation)}")
             observation = self.feature_encoder(observation)
 
             observation, mus, cov_mtxs = self.actor(observation)
@@ -404,7 +405,7 @@ class CustomSACPolicy(SACPolicy):
         
     def pred_upsampled_action(self, observation, deterministic=False): 
         with torch.no_grad(): 
-
+            # print(f"410: {torch.min(observation)}, {torch.max(observation)}")
             resnet_state = self.feature_encoder(observation)
 
             # Actor: Forward pass through the actor network (returns logits for actions)
@@ -468,6 +469,7 @@ class CustomSACPolicy(SACPolicy):
         return actions_upsampled, actions, log_prob.unsqueeze(1)
 
     def evaluate_actions(self, obs, actions): 
+        # print(f"474: {torch.min(obs)}, {torch.max(obs)}")
         combined = torch.cat([self.feature_encoder(obs), actions], dim=1)
         q1, q2 = self.critic(combined)
 
@@ -697,13 +699,13 @@ class ZarrSAC(SAC):
         # return model
 
 
-def make_env_fn(dataset, obj_detector, idx, latent_dim):
+def make_env_fn(dataset, obj_classifier, idx, latent_dim):
     def _init():
-        return DataloaderEnv(dataset, obj_detector, idx, latent_dim, batch_size=1)
+        return DataloaderEnv(dataset, obj_classifier, idx, latent_dim, batch_size=1)
     return _init
 
-def make_vec_env(dataset, obj_detector, num_envs, latent_dim):
-    return DummyVecEnv([make_env_fn(dataset, obj_detector, idx, latent_dim) for idx in range(num_envs)])
+def make_vec_env(dataset, obj_classifier, num_envs, latent_dim):
+    return DummyVecEnv([make_env_fn(dataset, obj_classifier, idx, latent_dim) for idx in range(num_envs)])
 
 # def linear_schedule(initial_value):
 #     def func(progress_remaining):
@@ -723,12 +725,12 @@ training_batch_size = 64
 num_train_envs = 32
 num_timesteps = 10
 train_data = train_dataloader(batch_size=batch_size, num_workers=0)
-obj_detector = YOLO("yolo11n.pt").to(device).eval()
-train_envs = make_vec_env(train_data, obj_detector, num_train_envs, latent_dim)
+obj_classifier = YOLO("yolo11n-cls.pt").to(device).eval()
+train_envs = make_vec_env(train_data, obj_classifier, num_train_envs, latent_dim)
 
 num_test_envs = 10
 test_data = test_dataloader(batch_size=batch_size, num_workers=0)
-eval_envs = make_vec_env(test_data, obj_detector, num_test_envs, latent_dim)
+eval_envs = make_vec_env(test_data, obj_classifier, num_test_envs, latent_dim)
 test_freq = 5 # every x timesteps in training
 # DataloaderEnv(train_data, obj_detector=obj_detector, batch_size=batch_size) # TODO consider SubProcEnv
 
@@ -797,8 +799,8 @@ def rollout(
         perturbed_normalized_clamp = renormalize_batch(perturbed_denormalized).cpu()
     
         with torch.no_grad():
-            orig_results = obj_detector(orig_denormalized, verbose=False)
-            perturbed_results = obj_detector(perturbed_denormalized, verbose=False)
+            orig_results = obj_classifier(orig_denormalized, verbose=False)
+            perturbed_results = obj_classifier(perturbed_denormalized, verbose=False)
 
         for i, env in enumerate(envs.envs):
             if step_num == 0: 
@@ -862,8 +864,8 @@ def train_model(
         with torch.no_grad():
             # print(f"711: {orig_denormalized.device}")
             # print(f"712: {perturbed_denormalized.device}")
-            orig_results = obj_detector(orig_denormalized, verbose=False)
-            perturbed_results = obj_detector(perturbed_denormalized, verbose=False)
+            orig_results = obj_classifier(orig_denormalized, verbose=False)
+            perturbed_results = obj_classifier(perturbed_denormalized, verbose=False)
 
         for j, env in enumerate(train_envs.envs):
             env.set_results(perturbed_normalized_clamp[j], orig_results[j], perturbed_results[j])
@@ -886,6 +888,8 @@ def train_model(
                 # print(batch.observations.shape, batch.actions.shape, batch.next_observations.shape, batch.dones.shape, batch.rewards.shape)
 
                 with torch.no_grad():
+                    # print(f"893: {torch.min(batch.observations)}, {torch.max(batch.observations)}")
+                    # print(f"894: {torch.min(batch.next_observations)}, {torch.max(batch.next_observations)}")
                     # print(f"737: {batch.observations.device}")
                     # print(f"738: {batch.next_observations.device}")
                     latent_obs = policy.feature_encoder(batch.observations)
@@ -990,7 +994,7 @@ def train_model(
 time_save = time.time()
 
 # Save full model, not just policy
-# model.save(f"Learned_stretch_{time_save}.zip")
+# model.save(f"Learned_main_{time_save}.zip")
 
 # TODO delete when eval confirmed to work
 # del model # remove to demonstrate saving and loading

@@ -233,8 +233,8 @@ def calc_rewards(orig, perturbed, orig_results, perturbed_results, goal, done=No
         sum = same_det + same_spot_diff_cls + diff_spot_same_cls + diff_spot_diff_cls + removed + added
         if sum != 0: 
             rewards[0] /= sum
-        else: 
-            rewards[0] -= 200 
+        # else: 
+        #     rewards[0] -= 200 
 
         pass
 
