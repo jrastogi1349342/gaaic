@@ -59,7 +59,7 @@ model = ZarrSAC(
     # tensorboard_log="./sac_custom/",
 )
 
-model.load(f"Learned_main_1745866751.0885181.zip")
+model.load(f"Learned_main_1745940359.0014925.zip")
 
 def rollout(
     envs: DummyVecEnv, 

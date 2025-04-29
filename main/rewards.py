@@ -46,19 +46,19 @@ def calc_rewards(orig, perturbed, orig_results, perturbed_results, step_idx, don
     conf_diff = perturbed_probs.top1conf - orig_probs.top1conf # negative is the direction I want, if the classes are the same
 
     if same_class:
-        rewards[0] = -50 - 25 * conf_diff.item()
+        rewards[0] = -5 - 2.5 * conf_diff.item()
     else:  
         dones[0] = True
-        rewards[0] = 50
+        rewards[0] = 10
 
-    rewards[0] -= step_idx
+    rewards[0] -= 0.075 * step_idx
 
     # print(perturbed.shape, orig.shape)
 
-    l2_norms = np.linalg.norm((perturbed - orig).reshape(len(perturbed), -1), ord=2, axis=1)
+    # l2_norms = np.linalg.norm((perturbed - orig).reshape(len(perturbed), -1), ord=2, axis=1)
     # print("L2 norms:", l2_norms)
     # print("Rewards without L2 norm", rewards)
-    rewards -= l2_norms
+    # rewards -= l2_norms
     # dones_torch = np.array(dones)
 
     # print(rewards_torch, dones_torch)

@@ -334,9 +334,9 @@ class CustomSACPolicy(SACPolicy):
         # TODO implement alpha 
         self.log_alpha = torch.nn.Parameter(torch.tensor(0.0, requires_grad=True))
 
-        self.actor.optimizer = torch.optim.Adam(self.actor.parameters(), lr=1e-4)
-        self.critic.optimizer = torch.optim.Adam(self.critic.parameters(), lr=1e-4)
-        self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=1e-4)
+        self.actor.optimizer = torch.optim.Adam(self.actor.parameters(), lr=5e-5)
+        self.critic.optimizer = torch.optim.Adam(self.critic.parameters(), lr=3e-4)
+        self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=5e-4)
 
         self.target_entropy = target_entropy
 
@@ -721,9 +721,9 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 gamma = 0.75
 latent_dim = 32
 batch_size = 1 # must be 1, use multiple environments for parallel episodes
-training_batch_size = 64
+training_batch_size = 256 # gets to 7040 mb, use for rest
 num_train_envs = 32
-num_timesteps = 10
+num_timesteps = 500
 train_data = train_dataloader(batch_size=batch_size, num_workers=0)
 obj_classifier = YOLO("yolo11n-cls.pt").to(device).eval()
 train_envs = make_vec_env(train_data, obj_classifier, num_train_envs, latent_dim)
@@ -732,6 +732,7 @@ num_test_envs = 10
 test_data = test_dataloader(batch_size=batch_size, num_workers=0)
 eval_envs = make_vec_env(test_data, obj_classifier, num_test_envs, latent_dim)
 test_freq = 5 # every x timesteps in training
+time_save = time.time()
 # DataloaderEnv(train_data, obj_detector=obj_detector, batch_size=batch_size) # TODO consider SubProcEnv
 
 # TODO look at: 
@@ -836,6 +837,12 @@ def train_model(
 ):
     train_envs.reset() 
     avg_rewards = []
+    actor_losses = []
+    critic_losses = []
+    alpha_losses = []
+    l1_norms = []
+    l2_norms = []
+    smoothness_vals = []
     # obs, _ = envs.reset()  # (num_envs, C, H, W)
     # obs = torch.tensor(obs, dtype=torch.float16, device=device)
     # num_envs = envs.num_envs
@@ -930,8 +937,14 @@ def train_model(
                 smoothness_loss = torch.mean(torch.abs(new_actions_upsampled[:, :, :-1] - new_actions_upsampled[:, :, 1:])) + \
                                   torch.mean(torch.abs(new_actions_upsampled[:, :-1, :] - new_actions_upsampled[:, 1:, :])) 
                 l1_norm_loss = torch.norm(new_actions_upsampled, p=1, dim=(1, 2, 3)).mean()
+                # 1e-2, 1e-3, 1e-2 for Learned_main_1745897869.9799478.zip
+                # 1e-1, 1e-3, 5e-4 for Learned_main_1745940359.0014925.zip
                 actor_loss = (policy.alpha.detach() * log_probs - torch.min(q_new_action_a, q_new_action_b)).mean() + \
-                             0.1 * l2_norm_loss + 0.01 * smoothness_loss + 0.1 * l1_norm_loss
+                             1e-1 * l2_norm_loss + 1e-3 * smoothness_loss + 5e-4 * l1_norm_loss
+                actor_losses.append(actor_loss.cpu().detach().numpy())
+                l2_norms.append(l2_norm_loss.cpu().detach().numpy())
+                l1_norms.append(l1_norm_loss.cpu().detach().numpy())
+                smoothness_vals.append(smoothness_loss.cpu().detach().numpy())
                 
                 actor_loss = actor_loss.to(policy.device)
 
@@ -939,10 +952,15 @@ def train_model(
                 # print(f"783: {batch.actions.device}")
                 current_q_a, current_q_b = policy.critic(torch.cat([downsampled_obs, batch.actions], dim=1))
                 critic_loss = F.mse_loss(current_q_a, target_q) + F.mse_loss(current_q_b, target_q)
+                critic_losses.append(critic_loss.cpu().detach().numpy())
+
                 critic_loss = critic_loss.to(policy.device)
 
                 # Alpha update
-                alpha_loss = -(policy.log_alpha * (log_probs.detach() + policy.target_entropy)).mean().to(policy.device)
+                alpha_loss = -(policy.log_alpha * (log_probs.detach() + policy.target_entropy)).mean()
+                alpha_losses.append(alpha_loss.cpu().detach().numpy())
+
+                alpha_loss = alpha_loss.to(policy.device)
 
                 # if i == 18: 
                 #     display_comp_graph(q_new_action_a, "q_new_action_a_iter18")
@@ -986,45 +1004,17 @@ def train_model(
             avg_rewards.append(rollout_val)
 
     if visualize_lc: 
-        plot_learning_curve(avg_rewards, test_freq)
+        plot_learning_curve(avg_rewards, test_freq, f"Learned_main_{time_save}_LC.png")
+        plot_per_step(actor_losses, 1, f"Learned_main_{time_save}_actor.png", "Actor Loss")
+        plot_per_step(critic_losses, 1, f"Learned_main_{time_save}_critic.png", "Critic Loss")
+        plot_per_step(alpha_losses, 1, f"Learned_main_{time_save}_alpha.png", "Alpha Loss")
+        plot_per_step(l1_norms, 1, f"Learned_main_{time_save}_l1.png", "L1 Loss")
+        plot_per_step(l2_norms, 1, f"Learned_main_{time_save}_l2.png", "L2 Loss")
+        plot_per_step(smoothness_vals, 1, f"Learned_main_{time_save}_smoothness.png", "Smoothness Loss")
 
-# 1000 timesteps, 16 envs, batch size 64 takes 1.5 hrs to run
-# train_model(model.env, eval_envs, model.policy, model.replay_buffer, total_timesteps=num_timesteps, batch_size=training_batch_size, gamma=gamma, test_freq=test_freq)
 
-time_save = time.time()
+# 1000 timesteps, 32 envs, batch size 256 takes 1 hr to run
+train_model(model.env, eval_envs, model.policy, model.replay_buffer, total_timesteps=num_timesteps, batch_size=training_batch_size, gamma=gamma, test_freq=test_freq)
 
 # Save full model, not just policy
-# model.save(f"Learned_main_{time_save}.zip")
-
-# TODO delete when eval confirmed to work
-# del model # remove to demonstrate saving and loading
-
-# model = ZarrSAC(
-#     policy=CustomSACPolicy,
-#     env=train_envs,
-#     buffer_size=10_000, 
-#     policy_kwargs=dict(
-#         encoder=encoder,
-#         latent_dim=latent_dim,
-#         batch_size=batch_size * num_train_envs,
-#         device=device
-#     ),
-#     # replay_buffer_class=ZarrReplayBuffer,
-#     # replay_buffer_kwargs={
-#     #     "store_path": "my_zarr_buffer",
-#     #     "compressor": "zstd"
-#     # },
-#     verbose=1,
-#     # tensorboard_log="./sac_custom/",
-# )
-
-# model.load(f"Learned_{time_save}.zip")
-
-# model.env.reset()
-
-# obs_batch = np.stack([env.batch for env in model.env.envs]).squeeze(1)  # (num_envs, C, H, W)
-# obs_tensor = torch.from_numpy(obs_batch).to(model.policy.device) 
-
-# with torch.no_grad():
-#     _, actions = model.policy.pred_upsampled_action(obs_tensor, deterministic=True)
-# print(actions.shape)
+model.save(f"Learned_main_{time_save}.zip")
