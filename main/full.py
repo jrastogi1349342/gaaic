@@ -242,20 +242,8 @@ class PerturbationModel(nn.Module):
         
     def set_training_mode(self, mode: bool):
         self.train(mode)
-
-    def soft_top_k_mask(self, x, k=50, temp=0.2): 
-        B, C, H, W = x.shape
-        flat = x.view(B, -1)
-        scores = flat.abs()
-
-        soft_scores = F.softmax(scores / temp, dim=1)
-        soft_mask = (soft_scores * (flat.numel() / B)) / (flat.numel() / B) * k
-        soft_mask = torch.clamp(soft_mask, max=1.0)
-    
-        return soft_mask.view(B, C, H, W)
         
-    # TODO add logic to use full decoding for gradients, soft top k for adding to image only
-    def decode(self, x, k=50000, temp=0.9):
+    def decode(self, x):
         # with torch.autograd.detect_anomaly():
         assert not torch.isnan(x).any(), "Latent action contains NaNs!"
         assert not torch.isinf(x).any(), "Latent action contains Infs!"
@@ -270,9 +258,6 @@ class PerturbationModel(nn.Module):
 
         assert not torch.isnan(x).any(), "Deconvolved action contains NaNs!"
         assert not torch.isinf(x).any(), "Deconvolved action contains Infs!"
-
-        mask = self.soft_top_k_mask(x, k=k, temp=temp)
-        x = x * mask
 
         x = torch.clamp(x, min=-1.0, max=1.0)
 
@@ -346,7 +331,6 @@ class CustomSACPolicy(SACPolicy):
 
         self.critic_target.load_state_dict(self.critic.state_dict())
 
-        # TODO implement alpha 
         self.log_alpha = torch.nn.Parameter(torch.tensor(0.0, requires_grad=True))
 
         self.actor.optimizer = torch.optim.Adam(self.actor.parameters(), lr=5e-5)
@@ -497,6 +481,16 @@ class CustomSACPolicy(SACPolicy):
     def alpha(self): 
         return self.log_alpha.exp()
     
+def soft_top_k_mask(x, k=50000, temp=0.9): 
+    B, C, H, W = x.shape
+    flat = x.view(B, -1)
+    scores = flat.abs()
+
+    soft_scores = F.softmax(scores / temp, dim=1)
+    soft_mask = (soft_scores * (flat.numel() / B)) / (flat.numel() / B) * k
+    soft_mask = torch.clamp(soft_mask, max=1.0)
+
+    return soft_mask.view(B, C, H, W)
 
 class ZarrReplayBuffer():
     def __init__(
@@ -748,6 +742,8 @@ test_data = test_dataloader(batch_size=batch_size, num_workers=0)
 eval_envs = make_vec_env(test_data, obj_classifier, num_test_envs, latent_dim)
 test_freq = 5 # every x timesteps in training
 time_save = time.time()
+# k = 50000
+# temp = 0.9
 # DataloaderEnv(train_data, obj_detector=obj_detector, batch_size=batch_size) # TODO consider SubProcEnv
 
 # TODO look at: 
@@ -790,6 +786,8 @@ def rollout(
     policy: CustomSACPolicy,
     gamma: float,
     max_steps: int = 50, 
+    # k: int = 50000, 
+    # temp: float = 0.75
 ): 
     envs.reset()
 
@@ -806,6 +804,9 @@ def rollout(
         
         # latent_actions = latent_actions.cpu().numpy()
         actions_npy = actions.cpu().numpy()
+
+        # mask = soft_top_k_mask(actions, k=k, temp=temp)
+        # actions = actions * mask
 
         perturbed_normalized_to_s = obs_tensor + actions # not [0,1]
 
@@ -848,7 +849,9 @@ def train_model(
     gamma: float = 0.95,
     tau: float = 0.005, 
     test_freq: float = 5, 
-    visualize_lc: bool = True
+    visualize_lc: bool = True, 
+    # k: int = 50000, 
+    # temp: float = 0.75
 ):
     train_envs.reset() 
     avg_rewards = []
@@ -876,6 +879,9 @@ def train_model(
         
         latent_actions = latent_actions.cpu().numpy()
         actions_npy = actions.cpu().numpy()
+
+        # mask = soft_top_k_mask(actions, k=k, temp=temp)
+        # actions = actions * mask
 
         perturbed_normalized_to_s = obs_tensor + actions # not [0,1]
 
@@ -957,8 +963,9 @@ def train_model(
                 # 1e-1, 1e-3, 5e-4 for Learned_main_1745940359.0014925.zip
                 # 1e-2, 0, 1e-4 for Learned_main_1745976187.284214.zip, with smooth top-k k=50, temp=0.2
                 # 1e-2, 0, 1e-4 for Learned_main_1745978720.9735777.zip, with smooth top-k k=50000, temp=0.75
+                # 1e-2, 1e-5, 1e-5 for Learned_main_1746032822.896086.zip, with smooth top-k k=50000, temp=0.9
                 actor_loss = (policy.alpha.detach() * log_probs - torch.min(q_new_action_a, q_new_action_b)).mean() + \
-                             1e-2 * l2_norm_loss + 0 * smoothness_loss + 1e-5 * l1_norm_loss
+                             1e-2 * l2_norm_loss + 1e-5 * smoothness_loss + 1e-5 * l1_norm_loss
                 actor_losses.append(actor_loss.cpu().detach().numpy())
                 l2_norms.append(l2_norm_loss.cpu().detach().numpy())
                 l1_norms.append(l1_norm_loss.cpu().detach().numpy())
@@ -1018,6 +1025,7 @@ def train_model(
 
         if i % test_freq == 0: 
             rollout_val = rollout(test_envs, policy, gamma)
+            # rollout_val = rollout(test_envs, policy, gamma, k=k, temp=temp)
             if rollout_val > max_rollout_found: 
                 model.save(f"Learned_main_intermed_{time_save}.zip")
                 max_rollout_found = rollout_val
@@ -1035,7 +1043,8 @@ def train_model(
 
 
 # 1000 timesteps, 32 envs, batch size 256 takes 1 hr to run
-# train_model(model.env, eval_envs, model.policy, model.replay_buffer, total_timesteps=num_timesteps, batch_size=training_batch_size, gamma=gamma, test_freq=test_freq)
+train_model(model.env, eval_envs, model.policy, model.replay_buffer, total_timesteps=num_timesteps, batch_size=training_batch_size, gamma=gamma, test_freq=test_freq)
+# train_model(model.env, eval_envs, model.policy, model.replay_buffer, total_timesteps=num_timesteps, batch_size=training_batch_size, gamma=gamma, test_freq=test_freq, k=k, temp=temp)
 
-# # Save full model, not just policy
-# model.save(f"Learned_main_{time_save}.zip")
+# Save full model, not just policy
+model.save(f"Learned_main_{time_save}.zip")

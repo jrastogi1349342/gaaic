@@ -9,13 +9,10 @@ import numpy as np
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from dataloader import train_dataloader, test_dataloader, val_dataloader, denormalize_batch, renormalize_batch, display_batch
 from environment import DataloaderEnv
-from full import Encoder, ZarrSAC, CustomSACPolicy
+from full import Encoder, ZarrSAC, CustomSACPolicy, soft_top_k_mask
 
 from utils import *
 
-
-# state_dict = torch.load("Learned_1745801363.5347984.zip")
-# print(state_dict.keys())  # Print the keys to check which parameters are saved
 
 
 def make_env_fn(dataset, obj_classifier, idx, latent_dim):
@@ -59,7 +56,7 @@ model = ZarrSAC(
     # tensorboard_log="./sac_custom/",
 )
 
-model.load(f"Learned_main_1745978720.9735777.zip")
+model.load(f"Learned_main_1746032822.896086.zip")
 
 def rollout(
     envs: DummyVecEnv, 
@@ -79,6 +76,9 @@ def rollout(
 
         with torch.no_grad():
             _, actions = policy.pred_upsampled_action(obs_tensor, deterministic=True)
+
+        # mask = soft_top_k_mask(actions, k=50000, temp=0.9)
+        # actions = actions * mask
         
         # latent_actions = latent_actions.cpu().numpy()
         actions_npy = actions.cpu().numpy()
