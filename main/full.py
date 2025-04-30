@@ -242,8 +242,20 @@ class PerturbationModel(nn.Module):
         
     def set_training_mode(self, mode: bool):
         self.train(mode)
+
+    def soft_top_k_mask(self, x, k=50, temp=0.2): 
+        B, C, H, W = x.shape
+        flat = x.view(B, -1)
+        scores = flat.abs()
+
+        soft_scores = F.softmax(scores / temp, dim=1)
+        soft_mask = (soft_scores * (flat.numel() / B)) / (flat.numel() / B) * k
+        soft_mask = torch.clamp(soft_mask, max=1.0)
+    
+        return soft_mask.view(B, C, H, W)
         
-    def decode(self, x):
+    # TODO add logic to use full decoding for gradients, soft top k for adding to image only
+    def decode(self, x, k=50000, temp=0.9):
         # with torch.autograd.detect_anomaly():
         assert not torch.isnan(x).any(), "Latent action contains NaNs!"
         assert not torch.isinf(x).any(), "Latent action contains Infs!"
@@ -258,6 +270,9 @@ class PerturbationModel(nn.Module):
 
         assert not torch.isnan(x).any(), "Deconvolved action contains NaNs!"
         assert not torch.isinf(x).any(), "Deconvolved action contains Infs!"
+
+        mask = self.soft_top_k_mask(x, k=k, temp=temp)
+        x = x * mask
 
         x = torch.clamp(x, min=-1.0, max=1.0)
 
@@ -313,7 +328,7 @@ class CustomSACPolicy(SACPolicy):
     """
     implements both actor and critic in one model
     """
-    def __init__(self, observation_space, action_space, lr_schedule, encoder, latent_dim, batch_size, target_entropy=-32.0, device="cuda", **kwargs):
+    def __init__(self, observation_space, action_space, lr_schedule, encoder, latent_dim, batch_size, target_entropy=-5.0, device="cuda", **kwargs):
         super().__init__(observation_space, action_space, lr_schedule)
         self.feature_encoder = encoder
         self.batch_size = batch_size
@@ -336,7 +351,7 @@ class CustomSACPolicy(SACPolicy):
 
         self.actor.optimizer = torch.optim.Adam(self.actor.parameters(), lr=5e-5)
         self.critic.optimizer = torch.optim.Adam(self.critic.parameters(), lr=3e-4)
-        self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=5e-4)
+        self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=1e-4)
 
         self.target_entropy = target_entropy
 
@@ -837,6 +852,7 @@ def train_model(
 ):
     train_envs.reset() 
     avg_rewards = []
+    max_rollout_found = -np.inf
     actor_losses = []
     critic_losses = []
     alpha_losses = []
@@ -939,8 +955,10 @@ def train_model(
                 l1_norm_loss = torch.norm(new_actions_upsampled, p=1, dim=(1, 2, 3)).mean()
                 # 1e-2, 1e-3, 1e-2 for Learned_main_1745897869.9799478.zip
                 # 1e-1, 1e-3, 5e-4 for Learned_main_1745940359.0014925.zip
+                # 1e-2, 0, 1e-4 for Learned_main_1745976187.284214.zip, with smooth top-k k=50, temp=0.2
+                # 1e-2, 0, 1e-4 for Learned_main_1745978720.9735777.zip, with smooth top-k k=50000, temp=0.75
                 actor_loss = (policy.alpha.detach() * log_probs - torch.min(q_new_action_a, q_new_action_b)).mean() + \
-                             1e-1 * l2_norm_loss + 1e-3 * smoothness_loss + 5e-4 * l1_norm_loss
+                             1e-2 * l2_norm_loss + 0 * smoothness_loss + 1e-5 * l1_norm_loss
                 actor_losses.append(actor_loss.cpu().detach().numpy())
                 l2_norms.append(l2_norm_loss.cpu().detach().numpy())
                 l1_norms.append(l1_norm_loss.cpu().detach().numpy())
@@ -1000,6 +1018,9 @@ def train_model(
 
         if i % test_freq == 0: 
             rollout_val = rollout(test_envs, policy, gamma)
+            if rollout_val > max_rollout_found: 
+                model.save(f"Learned_main_intermed_{time_save}.zip")
+                max_rollout_found = rollout_val
             # print(f"Running rollout: {rollout_val}")
             avg_rewards.append(rollout_val)
 
@@ -1014,7 +1035,7 @@ def train_model(
 
 
 # 1000 timesteps, 32 envs, batch size 256 takes 1 hr to run
-train_model(model.env, eval_envs, model.policy, model.replay_buffer, total_timesteps=num_timesteps, batch_size=training_batch_size, gamma=gamma, test_freq=test_freq)
+# train_model(model.env, eval_envs, model.policy, model.replay_buffer, total_timesteps=num_timesteps, batch_size=training_batch_size, gamma=gamma, test_freq=test_freq)
 
-# Save full model, not just policy
-model.save(f"Learned_main_{time_save}.zip")
+# # Save full model, not just policy
+# model.save(f"Learned_main_{time_save}.zip")
