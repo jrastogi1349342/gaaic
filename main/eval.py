@@ -9,7 +9,7 @@ import numpy as np
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from dataloader import train_dataloader, test_dataloader, val_dataloader, denormalize_batch, renormalize_batch, display_batch
 from environment import DataloaderEnv
-from full import Encoder, ZarrSAC, CustomSACPolicy, soft_top_k_mask
+from full import Encoder, ZarrSAC, CustomSACPolicy
 
 from utils import *
 
@@ -47,16 +47,10 @@ model = ZarrSAC(
         batch_size=batch_size * num_train_envs,
         device=device
     ),
-    # replay_buffer_class=ZarrReplayBuffer,
-    # replay_buffer_kwargs={
-    #     "store_path": "my_zarr_buffer",
-    #     "compressor": "zstd"
-    # },
     verbose=1,
-    # tensorboard_log="./sac_custom/",
 )
 
-model.load(f"Learned_main_1746032822.896086.zip")
+model.load(f"Learned_main_1746038941.135299.zip")
 
 def rollout(
     envs: DummyVecEnv, 
@@ -77,10 +71,6 @@ def rollout(
         with torch.no_grad():
             _, actions = policy.pred_upsampled_action(obs_tensor, deterministic=True)
 
-        # mask = soft_top_k_mask(actions, k=50000, temp=0.9)
-        # actions = actions * mask
-        
-        # latent_actions = latent_actions.cpu().numpy()
         actions_npy = actions.cpu().numpy()
 
         perturbed_normalized_to_s = obs_tensor + actions # not [0,1]
@@ -104,8 +94,6 @@ def rollout(
         next_obs, rewards, dones, _ = envs.step(actions_npy)
         total_rewards += curr_gamma * rewards
         curr_gamma *= gamma
-
-        # print(obs_tensor.device, torch.min(obs_tensor), torch.max(obs_tensor), perturbed_normalized_clamp.device, torch.min(perturbed_normalized_clamp), torch.max(perturbed_normalized_clamp))
 
         display_batch(obs_tensor)
         display_batch(perturbed_normalized_clamp)

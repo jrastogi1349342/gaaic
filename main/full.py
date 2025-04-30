@@ -4,30 +4,23 @@ import torch.nn.functional as F
 import torch.optim as optim
 import torchvision.models as models
 import numpy as np
-from collections import namedtuple
 import argparse
-from itertools import count
 import sys
 import os
 from ultralytics import YOLO
 from typing import Callable, Optional
 from stable_baselines3.common.utils import polyak_update
 from tqdm import trange
-from torch.amp import GradScaler
 import time
 
 import zarr
-from numcodecs import Blosc
 from zarr.codecs import BloscCodec
 
 from stable_baselines3 import SAC
 
 from stable_baselines3.sac.policies import SACPolicy
 from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv
-from stable_baselines3.common.utils import get_linear_fn
-from stable_baselines3.common.buffers import ReplayBuffer
-from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
-from stable_baselines3.common.type_aliases import Schedule, GymStepReturn, DictReplayBufferSamples
+from stable_baselines3.common.type_aliases import GymStepReturn, DictReplayBufferSamples
 from stable_baselines3.common.distributions import SquashedDiagGaussianDistribution
 
 
@@ -44,7 +37,6 @@ parser.add_argument('--gamma', type=float, default=0.99, metavar='G',
                     help='discount factor (default: 0.99)')
 args = parser.parse_args()
 
-# torch.autograd.set_detect_anomaly(True)
 
 # To run: python3 main/full.py
 
@@ -66,13 +58,8 @@ class Encoder(nn.Module):
                 module.train()
 
     def forward(self, x): 
-        assert not torch.isnan(x).any(), "State contains NaNs in Encoder!"
-        assert not torch.isinf(x).any(), "State contains Infs in Encoder!"
         x = self.encoder(x).squeeze(-1).squeeze(-1)
-        assert not torch.isnan(x).any(), "NaN detected after resnet encoder!"
-        assert not torch.isinf(x).any(), "Inf detected after resnet encoder!"
-        # print("Min of latent embedding:", torch.min(x), "Max of latent embedding:", torch.max(x), "Nan:", torch.any(torch.isnan(x)), "Inf:", torch.any(torch.isinf(x)))
-        # print("Encoder fc:", self.fc.weight)
+
         return x
 
 # Actor
@@ -104,9 +91,6 @@ class PerturbationModel(nn.Module):
             nn.LeakyReLU(inplace=True)
         ).to(device)
         
-        # nn.init.kaiming_uniform_(self.mu.weight, a=5)
-        # nn.init.kaiming_uniform_(self.log_cholesky_layer.weight, a=2)
-
         # 154 MB VRAM for fc and deconv combined
         self.fc = nn.Sequential(
             nn.Linear(latent_dim, 1024 * 7 * 7), 
@@ -138,44 +122,9 @@ class PerturbationModel(nn.Module):
 
     # a = pi(s), for latent state s
     def forward(self, x): 
-        # with torch.autograd.detect_anomaly():
-
-        assert not torch.isnan(x).any(), "State contains NaNs after Resnet!"
-        assert not torch.isinf(x).any(), "State contains NaNs after Resnet!"
-        # print(f"After resnet, min: {torch.min(x)}\tmax: {torch.max(x)}")
-
-        # print("Mu min:", torch.min(self.mu.weight), "Max:", torch.max(self.mu.weight), "Nan:", torch.any(torch.isnan(self.mu.weight)), "Inf:", torch.any(torch.isinf(self.mu.weight)))
-        # print("Log std min:", torch.min(self.log_std.weight), "Max:", torch.max(self.log_std.weight), "Nan:", torch.any(torch.isnan(self.log_std.weight)), "Inf:", torch.any(torch.isinf(self.log_std.weight)))
-        # print("Low rank factor min:", torch.min(self.low_rank_factor.weight), "Max:", torch.max(self.low_rank_factor.weight), "Nan:", torch.any(torch.isnan(self.low_rank_factor.weight)), "Inf:", torch.any(torch.isinf(self.low_rank_factor.weight)))
-        # print("x min:", torch.min(x), "Max:", torch.max(x), "Nan:", torch.any(torch.isnan(x)), "Inf:", torch.any(torch.isinf(x)))
-
         x = self.downsampled_enc(x)
-        assert not torch.isnan(x).any() and not torch.isinf(x).any(), \
-                f"""NaNs/Infs detected after downsampled encoder fc! {count_nan_in_weights(self.downsampled_enc)} NaNs model, 
-                {count_inf_in_weights(self.downsampled_enc)} Infs model, 
-                {torch.sum(torch.isnan(x)).item()} NaNs downsampled, {torch.sum(torch.isinf(x)).item()} Infs downsampled"""
-        # assert not torch.isinf(x).any(), f"Inf detected after downsampled encoder fc! {count_inf_in_weights(self.downsampled_enc)} Infs in model, {torch.sum(torch.isinf(x)).item()} in downsampled" 
-
         mus = self.mu(x).float()
-
-        assert not torch.isnan(mus).any() and not torch.isinf(mus).any(), \
-                f"""NaNs/Infs detected after mu calc! {count_nan_in_weights(self.mu)} NaNs model, 
-                {count_inf_in_weights(self.mu)} Infs model, 
-                {torch.sum(torch.isnan(mus)).item()} NaNs calc, {torch.sum(torch.isinf(mus)).item()} Infs calc"""
-
-        # assert not torch.isnan(x).any(), f"NaN detected after mu calc! {self.downsampled_enc.weight}"
-        # assert not torch.isinf(x).any(), f"Inf detected after mu calc! {self.mu.weight}"
-
         lower_triang_elts = self.log_cholesky_layer(x).float()
-
-        assert not torch.isnan(lower_triang_elts).any() and not torch.isinf(lower_triang_elts).any(), \
-                f"""NaNs/Infs detected after cov calc! {count_nan_in_weights(self.log_cholesky_layer)} NaNs model, 
-                {count_inf_in_weights(self.log_cholesky_layer)} Infs model, 
-                {torch.sum(torch.isnan(lower_triang_elts)).item()} NaNs calc, {torch.sum(torch.isinf(lower_triang_elts)).item()} Infs calc"""
-
-        # assert not torch.isnan(x).any(), f"NaN detected after Lower triang covariance calc! {self.log_cholesky_layer.weight}"
-        # assert not torch.isinf(x).any(), f"Inf detected after Lower triang covariance calc! {self.log_cholesky_layer.weight}"
-
         lower_triang = torch.zeros(lower_triang_elts.shape[0], self.latent_dim, self.latent_dim, device=self.device)
 
         indices = torch.tril_indices(self.latent_dim, self.latent_dim)
@@ -184,59 +133,9 @@ class PerturbationModel(nn.Module):
         # Exponentiate diagonal elements for stability
         diag_indices = torch.arange(self.latent_dim, device=self.device)
         lower_triang[:, diag_indices, diag_indices] = torch.nn.functional.softplus(lower_triang[:, diag_indices, diag_indices]).clamp(min=1e-3, max=1e2) + 1e-2
-        # lower_triang = lower_triang.to(torch.float32)
 
-        # with torch.autocast(device_type='cuda', enabled=False): 
         cov_mtxs = torch.matmul(lower_triang, lower_triang.transpose(-1, -2)) 
-        # print(f"Before sum: {lower_triang.dtype}, {lower_triang.transpose(-1, -2).dtype}, {cov_mtxs.dtype}")
         cov_mtxs += torch.eye(self.latent_dim, device=self.device, dtype=torch.float32) * 1e-2
-
-        # print(f"After sum: {lower_triang.dtype}, {cov_mtxs.dtype}")
-        if torch.isnan(cov_mtxs).any() or torch.isinf(cov_mtxs).any():
-            print("NaN or Inf detected in cov_mtxs!")
-
-        # log_std = self.log_std(x).float()
-        # log_std = torch.clamp(log_std, min=-5, max=2) # prevent exploding values
-        # std = torch.exp(log_std)
-        # print(f"Std min: {std.min()}, max: {std.max()}")
-        # # print(mus.shape, log_std.shape, std.shape)
-        # assert not torch.isnan(mus).any(), "NaN detected Perturbation Model 2!"
-        # assert not torch.isinf(mus).any(), "Inf detected Perturbation Model 2!"
-        # assert not torch.isnan(mus).any(), "NaN detected Perturbation Model 3!"
-        # assert not torch.isinf(log_std).any(), "Inf detected Perturbation Model 3!"
-        # assert not torch.isnan(mus).any(), "NaN detected Perturbation Model 4!"
-        # assert not torch.isinf(log_std).any(), "Inf detected Perturbation Model 4!"
-
-        # diag_cov = torch.diag_embed(std ** 2 + 1e-2)
-
-        # # print(x.shape) 
-        # # print(self.low_rank_factor(x).shape)
-        # U = self.low_rank_factor(x).view(self.batch_size, self.latent_dim, self.low_rank).float()
-        # low_rank_cov = torch.matmul((U * 15), (U * 15).transpose(-1, -2)) # PSD
-
-        # ranks = torch.linalg.matrix_rank(U)
-        # print(f"Ranks of U: {ranks}\tDesired rank: {self.low_rank}")
-        # # print(diag_cov.shape, U.shape, low_rank_cov.shape)
-
-        # print(f"Mean norm of U: {torch.norm(U, dim=[-2, -1]).mean().item()}")
-
-        # cov_mtxs = diag_cov + low_rank_cov + torch.eye(self.latent_dim, device=x.device) * 2e-1 # for stability
-        # cov_mtxs *= 0.1 # For stability
-        # print(f"Covs min: {cov_mtxs.min()}, max: {cov_mtxs.max()}, type: {cov_mtxs.dtype}")
-
-        # ranks = torch.linalg.matrix_rank(cov_mtxs)
-        # print(f"Ranks of Cov mtxs: {ranks}\tDesired rank: {self.latent_dim}")
-        
-        # print(f"Min mu: {torch.min(mus)}\tMax mu: {torch.max(mus)}")
-
-        # eigenvalues = torch.linalg.eigvalsh(cov_mtxs) 
-        # print(f"Min eigenvalues: {eigenvalues.min(dim=-1)[0]}")  # Get the minimum eigenvalue per batch
-        # # assert torch.all(eigenvalues >= 0), "Some covariance matrices are not PSD!"
-
-        # print(f"Trace of covariance: {cov_mtxs.diagonal(dim1=-2, dim2=-1).sum(dim=-1)}")
-
-        # logdet = torch.slogdet(cov_mtxs)
-        # print(f"Sign of determinant of covariance matrices: {logdet.sign}\tLog of det: {logdet.logabsdet}")
 
         return x, mus, cov_mtxs
         
@@ -244,25 +143,12 @@ class PerturbationModel(nn.Module):
         self.train(mode)
         
     def decode(self, x):
-        # with torch.autograd.detect_anomaly():
-        assert not torch.isnan(x).any(), "Latent action contains NaNs!"
-        assert not torch.isinf(x).any(), "Latent action contains Infs!"
-
         x = self.fc(x)
-
-        assert not torch.isnan(x).any(), "Upsampled latent action contains NaNs!"
-        assert not torch.isinf(x).any(), "Upsampled latent action contains Infs!"
 
         x = x.view(x.size(0), 1024, 7, 7)
         x = self.deconv(x)
 
-        assert not torch.isnan(x).any(), "Deconvolved action contains NaNs!"
-        assert not torch.isinf(x).any(), "Deconvolved action contains Infs!"
-
         x = torch.clamp(x, min=-1.0, max=1.0)
-
-        # Alternative
-        # return self.deconv(x.unsqueeze(-1).unsqueeze(-1))  # Add dimensions for ConvTranspose2d
 
         return x
     
@@ -322,8 +208,6 @@ class CustomSACPolicy(SACPolicy):
         self.action_space = action_space
 
         self.actor = PerturbationModel(latent_dim, device=device, batch_size=batch_size)
-        assert isinstance(self.actor, nn.Module), "Actor must be nn.Module"
-        assert hasattr(self.actor, "train"), "Actor must have train function"
 
         # Input: concatenated state and action latent vectors
         self.critic = Critic(latent_dim=latent_dim, device=self.device)
@@ -339,6 +223,7 @@ class CustomSACPolicy(SACPolicy):
 
         self.target_entropy = target_entropy
 
+    # TODO update to work
     def forward(self, *args, **kwargs):
         """
         Forward pass for SAC policy (actor and critic).
@@ -349,9 +234,6 @@ class CustomSACPolicy(SACPolicy):
         """
         obs = args[0]
         deterministic = args[1] if len(args) > 1 else False
-        # print(f"[DEBUG] type(obs): {type(obs)}")
-        # print(f"[DEBUG] hasattr(obs, 'shape'): {hasattr(obs, 'shape')}")
-        # print(f"[DEBUG] obs: {obs}")
         
         if isinstance(obs, np.ndarray):
             obs_tensor = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
@@ -361,13 +243,10 @@ class CustomSACPolicy(SACPolicy):
         else:
             raise TypeError(f"Unsupported observation type: {type(obs)}")
 
-        # print(f"367: {torch.min(obs_tensor)}, {torch.max(obs_tensor)}")
         resnet_state = self.feature_encoder(obs_tensor)
 
-        # Actor: Forward pass through the actor network (returns logits for actions)
         latent_state, mus, cov_mtxs = self.actor(resnet_state)
 
-        # Action distribution: Squashed Gaussian distribution for continuous actions
         # Note: old, unused
         dist = SquashedDiagGaussianDistribution(mus, cov_mtxs)
 
@@ -377,9 +256,7 @@ class CustomSACPolicy(SACPolicy):
         else:
             action = dist.sample()  # For stochastic action
 
-        # half_actions_latent = action.half()
         combined = torch.cat([latent_state, action], dim=1)
-        # print(half_actions_latent.dtype, combined.dtype)
 
         # Note: old, unused
         values = self.critic(combined)
@@ -388,7 +265,6 @@ class CustomSACPolicy(SACPolicy):
 
     def _predict(self, observation, deterministic = False):
         with torch.no_grad(): 
-            # print(f"394: {torch.min(observation)}, {torch.max(observation)}")
             observation = self.feature_encoder(observation)
 
             observation, mus, cov_mtxs = self.actor(observation)
@@ -404,20 +280,10 @@ class CustomSACPolicy(SACPolicy):
         
     def pred_upsampled_action(self, observation, deterministic=False): 
         with torch.no_grad(): 
-            # print(f"410: {torch.min(observation)}, {torch.max(observation)}")
             resnet_state = self.feature_encoder(observation)
 
             # Actor: Forward pass through the actor network (returns logits for actions)
             latent_state, mus, cov_mtxs = self.actor(resnet_state)
-
-            # # Action distribution: Squashed Gaussian distribution for continuous actions
-            # dist = SquashedDiagGaussianDistribution(mus, cov_mtxs)
-
-            # # Determine action (deterministic or stochastic)
-            # if deterministic:
-            #     action = dist.get_mean()  # For deterministic action
-            # else:
-            #     action = dist.sample()  # For stochastic action
 
             if deterministic: 
                 actions = mus
@@ -426,15 +292,10 @@ class CustomSACPolicy(SACPolicy):
 
                 actions = dist.sample()
 
-
-        # half_actions_latent = actions.half()
-
         return actions, self.actor.decode(actions).squeeze(0)
 
     # Note: observation is already latent vector
     def predict_action_with_prob(self, observation, deterministic = False):
-        # observation = self.feature_encoder(observation)
-
         observation, mus, cov_mtxs = self.actor(observation)
         log_prob = None
         
@@ -450,8 +311,6 @@ class CustomSACPolicy(SACPolicy):
 
     # Note: observation is already latent vector
     def predict_action_with_prob_upsampling(self, observation, deterministic = False):
-        # observation = self.feature_encoder(observation)
-
         observation, mus, cov_mtxs = self.actor(observation)
         log_prob = None
         
@@ -468,7 +327,6 @@ class CustomSACPolicy(SACPolicy):
         return actions_upsampled, actions, log_prob.unsqueeze(1)
 
     def evaluate_actions(self, obs, actions): 
-        # print(f"474: {torch.min(obs)}, {torch.max(obs)}")
         combined = torch.cat([self.feature_encoder(obs), actions], dim=1)
         q1, q2 = self.critic(combined)
 
@@ -480,17 +338,6 @@ class CustomSACPolicy(SACPolicy):
     @property
     def alpha(self): 
         return self.log_alpha.exp()
-    
-def soft_top_k_mask(x, k=50000, temp=0.9): 
-    B, C, H, W = x.shape
-    flat = x.view(B, -1)
-    scores = flat.abs()
-
-    soft_scores = F.softmax(scores / temp, dim=1)
-    soft_mask = (soft_scores * (flat.numel() / B)) / (flat.numel() / B) * k
-    soft_mask = torch.clamp(soft_mask, max=1.0)
-
-    return soft_mask.view(B, C, H, W)
 
 class ZarrReplayBuffer():
     def __init__(
@@ -504,8 +351,6 @@ class ZarrReplayBuffer():
         compressor: str = "zstd",
         **kwargs
     ):
-        # super().__init__(buffer_size, observation_space, action_space, device, **kwargs)
-
         self.store = zarr.open_group(store_path, mode='w')
 
         self.device = device
@@ -514,7 +359,6 @@ class ZarrReplayBuffer():
         self.obs_shape = observation_space.shape
         self.action_shape = action_space.shape
 
-        # compressor = Blosc(cname='zstd', clevel=3, shuffle=Blosc.BITSHUFFLE)
         compressor = BloscCodec(cname="zstd", clevel=3, shuffle="shuffle")
         self.pos = 0
         self.full = False
@@ -625,7 +469,6 @@ class ZarrSAC(SAC):
         # Don't call super()._setup_model() directly, it tries to use replay_buffer_class
         super(SAC, self)._setup_model()  # skip SAC-specific buffer setup
 
-        # Now manually set your custom buffer
         self.replay_buffer = ZarrReplayBuffer(
             buffer_size=self.buffer_size,
             observation_space=self.observation_space,
@@ -649,25 +492,6 @@ class ZarrSAC(SAC):
         # Save to the path
         torch.save(save_dict, path)
 
-
-
-        # # Before saving, ensure the ent_coef_tensor exists
-        # if not hasattr(self, 'ent_coef_tensor'):
-        #     self.ent_coef_tensor = self.policy.log_alpha
-
-        # if not hasattr(self, 'actor'):
-        #     self.actor = self.policy.actor  # Use the policy's actor
-        # if not hasattr(self, 'critic'):
-        #     self.critic = self.policy.critic  # Use the policy's critic
-        # if not hasattr(self, 'target_critic'):
-        #     self.target_critic = self.policy.critic_target  # Use the policy's target critic
-        # if not hasattr(self, 'ent_coef_optimizer'):
-        #     self.ent_coef_optimizer = self.policy.alpha_optimizer
-
-        
-        # # Call the original save method from SAC
-        # super(ZarrSAC, self).save(path, **kwargs)
-
     def load(self, path, env=None):
         state_dict = torch.load(path)
 
@@ -683,29 +507,7 @@ class ZarrSAC(SAC):
         self.critic.optimizer.load_state_dict(state_dict['critic_optimizer'])
         self.policy.alpha_optimizer.load_state_dict(state_dict['alpha_optimizer'])
 
-        # super(ZarrSAC, self).load(path, env)
-
         return self
-
-
-        # # Custom load logic if needed
-        # model = super(ZarrSAC, self).load(path, env=env)
-        
-        # # Ensure that ent_coef_tensor is loaded
-        # if not hasattr(model, 'ent_coef_tensor'):
-        #     model.ent_coef_tensor = self.alpha
-
-        # if not hasattr(self, 'actor'):
-        #     self.actor = self.policy.actor  # Use the policy's actor
-        # if not hasattr(self, 'critic'):
-        #     self.critic = self.policy.critic  # Use the policy's critic
-        # if not hasattr(self, 'target_critic'):
-        #     self.target_critic = self.policy.critic_target  # Use the policy's target critic
-        # if not hasattr(self, 'ent_coef_optimizer'):
-        #     self.ent_coef_optimizer = self.policy.alpha_optimizer
-
-
-        # return model
 
 
 def make_env_fn(dataset, obj_classifier, idx, latent_dim):
@@ -716,15 +518,6 @@ def make_env_fn(dataset, obj_classifier, idx, latent_dim):
 def make_vec_env(dataset, obj_classifier, num_envs, latent_dim):
     return DummyVecEnv([make_env_fn(dataset, obj_classifier, idx, latent_dim) for idx in range(num_envs)])
 
-# def linear_schedule(initial_value):
-#     def func(progress_remaining):
-#         return progress_remaining * initial_value
-#     return func
-
-# lr_schedule = get_linear_fn(3e-4, end=1e-5, end_fraction=0.1)
-
-    
-# SavedAction = namedtuple('SavedAction', ['log_prob', 'value'])
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 gamma = 0.75
@@ -732,7 +525,7 @@ latent_dim = 32
 batch_size = 1 # must be 1, use multiple environments for parallel episodes
 training_batch_size = 256 # gets to 7040 mb, use for rest
 num_train_envs = 32
-num_timesteps = 500
+num_timesteps = 10
 train_data = train_dataloader(batch_size=batch_size, num_workers=0)
 obj_classifier = YOLO("yolo11n-cls.pt").to(device).eval()
 train_envs = make_vec_env(train_data, obj_classifier, num_train_envs, latent_dim)
@@ -742,25 +535,15 @@ test_data = test_dataloader(batch_size=batch_size, num_workers=0)
 eval_envs = make_vec_env(test_data, obj_classifier, num_test_envs, latent_dim)
 test_freq = 5 # every x timesteps in training
 time_save = time.time()
-# k = 50000
-# temp = 0.9
-# DataloaderEnv(train_data, obj_detector=obj_detector, batch_size=batch_size) # TODO consider SubProcEnv
 
 # TODO look at: 
-# Consider SAC envs vs dataloader stuff
+# Consider SAC envs vs dataloader vs SubProcEnv
 # https://stable-baselines3.readthedocs.io/en/master/guide/vec_envs.html
 # https://stable-baselines3.readthedocs.io/en/master/common/monitor.html
 # https://stable-baselines3.readthedocs.io/en/master/guide/tensorboard.html
 
 
 encoder = Encoder(latent_dim=latent_dim, device=device)
-# model = CustomSACPolicy(encoder=encoder, latent_dim=latent_dim, batch_size=batch_size, 
-#                      observation_space=env.observation_space, action_space=env.action_space, 
-#                      device=device)
-# torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0, error_if_nonfinite=True)
-
-# optimizer = optim.Adam(model.parameters(), lr=1e-7)
-# eps = np.finfo(np.float32).eps.item()
 
 model = ZarrSAC(
     policy=CustomSACPolicy,
@@ -772,13 +555,7 @@ model = ZarrSAC(
         batch_size=batch_size * num_train_envs,
         device=device
     ),
-    # replay_buffer_class=ZarrReplayBuffer,
-    # replay_buffer_kwargs={
-    #     "store_path": "my_zarr_buffer",
-    #     "compressor": "zstd"
-    # },
     verbose=1,
-    # tensorboard_log="./sac_custom/",
 )
 
 def rollout(
@@ -786,8 +563,6 @@ def rollout(
     policy: CustomSACPolicy,
     gamma: float,
     max_steps: int = 50, 
-    # k: int = 50000, 
-    # temp: float = 0.75
 ): 
     envs.reset()
 
@@ -802,11 +577,7 @@ def rollout(
         with torch.no_grad():
             _, actions = policy.pred_upsampled_action(obs_tensor, deterministic=True)
         
-        # latent_actions = latent_actions.cpu().numpy()
         actions_npy = actions.cpu().numpy()
-
-        # mask = soft_top_k_mask(actions, k=k, temp=temp)
-        # actions = actions * mask
 
         perturbed_normalized_to_s = obs_tensor + actions # not [0,1]
 
@@ -836,8 +607,6 @@ def rollout(
         
     return total_rewards.mean()
 
-# model.learn(total_timesteps=5)
-
 def train_model(
     train_envs: DummyVecEnv,
     test_envs: DummyVecEnv, 
@@ -850,8 +619,6 @@ def train_model(
     tau: float = 0.005, 
     test_freq: float = 5, 
     visualize_lc: bool = True, 
-    # k: int = 50000, 
-    # temp: float = 0.75
 ):
     train_envs.reset() 
     avg_rewards = []
@@ -862,26 +629,16 @@ def train_model(
     l1_norms = []
     l2_norms = []
     smoothness_vals = []
-    # obs, _ = envs.reset()  # (num_envs, C, H, W)
-    # obs = torch.tensor(obs, dtype=torch.float16, device=device)
-    # num_envs = envs.num_envs
-    # print(num_envs)
-
-    # scaler = GradScaler("cuda")
 
     for i in trange(total_timesteps):
         obs_batch = np.stack([env.batch for env in train_envs.envs]).squeeze(1)  # (num_envs, C, H, W)
         obs_tensor = torch.from_numpy(obs_batch).to(policy.device) 
 
         with torch.no_grad():
-            # print(f"697: {obs_tensor.device}")
             latent_actions, actions = policy.pred_upsampled_action(obs_tensor, deterministic=False)
         
         latent_actions = latent_actions.cpu().numpy()
         actions_npy = actions.cpu().numpy()
-
-        # mask = soft_top_k_mask(actions, k=k, temp=temp)
-        # actions = actions * mask
 
         perturbed_normalized_to_s = obs_tensor + actions # not [0,1]
 
@@ -891,8 +648,6 @@ def train_model(
         perturbed_normalized_clamp = renormalize_batch(perturbed_denormalized).cpu()
     
         with torch.no_grad():
-            # print(f"711: {orig_denormalized.device}")
-            # print(f"712: {perturbed_denormalized.device}")
             orig_results = obj_classifier(orig_denormalized, verbose=False)
             perturbed_results = obj_classifier(perturbed_denormalized, verbose=False)
 
@@ -900,44 +655,24 @@ def train_model(
             env.set_results(perturbed_normalized_clamp[j], orig_results[j], perturbed_results[j])
 
         next_obs, rewards, dones, _ = train_envs.step(actions_npy)
-        # obs = obs.cpu()
-        # print("Obs and next obs shapes:", obs_batch.shape, next_obs.shape, rewards.shape, dones.shape)
-        # next_obs = torch.tensor(next_obs, dtype=torch.float16, device=device)
-
-        # rewards = torch.tensor(rewards, dtype=torch.float16, device=device).unsqueeze(-1)
-        # dones = torch.tensor(dones, dtype=torch.float16, device=device).unsqueeze(-1)
 
         replay_buffer.add(obs_batch, next_obs, latent_actions, rewards, dones)
-        # obs = next_obs
 
         if replay_buffer.length() >= batch_size:
             for _ in range(gradient_updates):
                 batch = replay_buffer.sample(batch_size)
 
-                # print(batch.observations.shape, batch.actions.shape, batch.next_observations.shape, batch.dones.shape, batch.rewards.shape)
-
                 with torch.no_grad():
-                    # print(f"893: {torch.min(batch.observations)}, {torch.max(batch.observations)}")
-                    # print(f"894: {torch.min(batch.next_observations)}, {torch.max(batch.next_observations)}")
-                    # print(f"737: {batch.observations.device}")
-                    # print(f"738: {batch.next_observations.device}")
                     latent_obs = policy.feature_encoder(batch.observations)
                     latent_next_obs = policy.feature_encoder(batch.next_observations)
 
-                # print(f"742: {latent_obs.device}")
-                # print(f"743: {latent_next_obs.device}")
                 downsampled_obs = policy.actor.downsampled_enc(latent_obs)
                 downsampled_next_obs = policy.actor.downsampled_enc(latent_next_obs)
 
                 with torch.no_grad():
                     next_actions, next_log_probs = policy.predict_action_with_prob(latent_next_obs, deterministic=False)
-                    # print(latent_next_obs.shape, next_actions.shape)
-                    # print(f"750: {downsampled_next_obs.device}")
-                    # print(f"751: {next_actions.device}")
                     q_next_a, q_next_b = policy.critic_target(torch.cat([downsampled_next_obs, next_actions], dim=1))
                     q_next = torch.min(q_next_a, q_next_b)
-
-                    # print(batch.rewards.unsqueeze(1).dtype, type(gamma), batch.dones.unsqueeze(1).dtype, q_next.dtype, policy.alpha.dtype, next_log_probs.dtype)
 
                     # TODO check if I need to detach alpha here, since in torch.no_grad()
                     target_q = batch.rewards.unsqueeze(1) + gamma * (1 - batch.dones.unsqueeze(1)) * (q_next - policy.alpha.detach() * next_log_probs)
@@ -946,14 +681,9 @@ def train_model(
                 policy.actor.optimizer.zero_grad()
                 policy.alpha_optimizer.zero_grad()
 
-                # with torch.autocast(device_type='cuda'): 
                 # Actor update
                 new_actions_upsampled, new_actions, log_probs = policy.predict_action_with_prob_upsampling(latent_obs, deterministic=False)
-                # print("obs:", downsampled_obs.min(), downsampled_obs.max(), downsampled_obs.mean())
-                # print("actions:", new_actions.min(), new_actions.max(), new_actions.mean())
 
-                # print(f"750: {downsampled_obs.device}")
-                # print(f"751: {new_actions.device}")
                 q_new_action_a, q_new_action_b = policy.critic(torch.cat([downsampled_obs, new_actions], dim=1))
                 l2_norm_loss = torch.norm(new_actions_upsampled, p=2, dim=(1, 2, 3)).mean()
                 smoothness_loss = torch.mean(torch.abs(new_actions_upsampled[:, :, :-1] - new_actions_upsampled[:, :, 1:])) + \
@@ -974,7 +704,6 @@ def train_model(
                 actor_loss = actor_loss.to(policy.device)
 
                 # Critic update
-                # print(f"783: {batch.actions.device}")
                 current_q_a, current_q_b = policy.critic(torch.cat([downsampled_obs, batch.actions], dim=1))
                 critic_loss = F.mse_loss(current_q_a, target_q) + F.mse_loss(current_q_b, target_q)
                 critic_losses.append(critic_loss.cpu().detach().numpy())
@@ -987,49 +716,26 @@ def train_model(
 
                 alpha_loss = alpha_loss.to(policy.device)
 
-                # if i == 18: 
-                #     display_comp_graph(q_new_action_a, "q_new_action_a_iter18")
-                #     display_comp_graph(current_q_a, "current_q_a_iter18")
-
-                # print(target_q.dtype, current_q_a.dtype)
-
-                # print(critic_loss, actor_loss, alpha_loss)
-
-                # with torch.autograd.set_detect_anomaly(True):
                 critic_loss.backward(retain_graph=True)
                 actor_loss.backward()
                 alpha_loss.backward()
 
-                    # scaler.scale(actor_loss).backward()
-                    # scaler.scale(critic_loss).backward()
-                    # scaler.scale(alpha_loss).backward()
-
                 policy.critic.optimizer.step()
                 policy.actor.optimizer.step()
                 policy.alpha_optimizer.step()
-
-                # scaler.step(policy.critic.optimizer)
-                # scaler.step(policy.actor.optimizer)
-                # scaler.step(policy.alpha_optimizer)
 
                 # Soft update target
                 polyak_update(policy.critic.parameters(), policy.critic_target.parameters(), tau)
 
         for idx, done in enumerate(dones):
             if done.item():
-                # print(f"Reset env {idx}")
                 train_envs.env_method("reset", indices=idx)
-            #     obs[idx] = torch.tensor(envs.reset_single(idx), dtype=torch.float16, device=device)
-            # else:
-            #     obs[idx] = next_obs[idx]
 
         if i % test_freq == 0: 
             rollout_val = rollout(test_envs, policy, gamma)
-            # rollout_val = rollout(test_envs, policy, gamma, k=k, temp=temp)
             if rollout_val > max_rollout_found: 
                 model.save(f"Learned_main_intermed_{time_save}.zip")
                 max_rollout_found = rollout_val
-            # print(f"Running rollout: {rollout_val}")
             avg_rewards.append(rollout_val)
 
     if visualize_lc: 
@@ -1044,7 +750,4 @@ def train_model(
 
 # 1000 timesteps, 32 envs, batch size 256 takes 1 hr to run
 train_model(model.env, eval_envs, model.policy, model.replay_buffer, total_timesteps=num_timesteps, batch_size=training_batch_size, gamma=gamma, test_freq=test_freq)
-# train_model(model.env, eval_envs, model.policy, model.replay_buffer, total_timesteps=num_timesteps, batch_size=training_batch_size, gamma=gamma, test_freq=test_freq, k=k, temp=temp)
-
-# Save full model, not just policy
 model.save(f"Learned_main_{time_save}.zip")

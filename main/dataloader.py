@@ -16,34 +16,6 @@ transform = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
-
-# class ImageNetDataset(Dataset): 
-#     def __init__(self, file_path, data_dir, transform=None): 
-#         with open(file_path, 'r') as f:
-#             self.image_files = [os.path.basename(line.strip()) for line in f.readlines()]
-
-#         self.data_dir = data_dir
-        
-#         # TODO add augmenting transforms or random resize crops
-#         self.transform = transform or transforms.Compose([
-#             transforms.Resize((480, 480)), 
-#             transforms.ToTensor(), 
-#             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-#         ])
-
-#     def __len__(self): 
-#         return len(self.image_files)
-    
-#     def __getitem__(self, idx):
-#         img_path = os.path.join(self.data_dir, self.image_files[idx])
-#         img = Image.open(img_path).convert("RGB")
-
-#         if img is None: 
-#             raise FileNotFoundError(f"Error loading image {img_path}")
-        
-#         img = self.transform(img)
-
-#         return img
     
 def display_img(img): 
     mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
@@ -78,7 +50,6 @@ def renormalize_batch(images):
 def display_batch(images, num_rows=2, num_cols=4):
     batch_size, C, H, W = images.shape
 
-    # ImageNet normalization stats (modify if using different dataset)
     mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).to("cuda")
     std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).to("cuda")
 
@@ -117,8 +88,3 @@ def test_dataloader(batch_size=8, num_workers=4, pin_memory=True):
     img_name = "test-dev"
     path_name = "test"
     return form_dataloader(img_name, path_name, batch_size=batch_size, num_workers=num_workers, pin_memory=pin_memory)
-
-# train_loader = train_dataloader()
-# if train_loader: 
-#     images = next(iter(train_loader)).to(device)
-#     display_img(images[0])

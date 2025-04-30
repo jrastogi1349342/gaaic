@@ -26,14 +26,8 @@ class DataloaderEnv(gym.Env):
 
 
         sample_state = next(self.dataloader)[0]
-        # print(len(sample_state))
         batch_size, *obs_shape = sample_state.shape
 
-        # print(batch_size)
-        # print(obs_shape)
-        # print(sample_state.shape)
-
-        # TODO figure this out
         self.observation_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(obs_shape))
         self.action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=((latent_dim, )))
 
@@ -61,9 +55,6 @@ class DataloaderEnv(gym.Env):
         self.next_batch = None
         self.done = None
 
-        # print(next_batch.shape, type(next_batch), reward_batches.shape, type(reward_batches), done_batches.shape, type(done_batches))
-        # self.info[self.step_idx].append
-
         return self.batch, reward_batches, done_batches, {}, {}
 
     def set_results(self, next_batch, orig_yolo, perturbed_yolo, done=None):
@@ -72,6 +63,3 @@ class DataloaderEnv(gym.Env):
         self.perturbed_yolo = perturbed_yolo
         self.done = done
     
-    # def set_result(self, reward, done):
-    #     self.reward = reward
-    #     self.done = done
