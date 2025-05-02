@@ -36,7 +36,10 @@ def denormalize_batch(images):
 
     # Denormalize images
     images = images * std + mean
-    images = torch.clamp(images, 0, 1)
+
+    # TODO come up with better expression for this that's still differentiable
+    images = torch.sigmoid(4 * images - 2)
+    # images = torch.clamp(images, 0, 1)
 
     return images
 

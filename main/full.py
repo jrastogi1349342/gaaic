@@ -146,9 +146,7 @@ class PerturbationModel(nn.Module):
         x = self.fc(x)
 
         x = x.view(x.size(0), 1024, 7, 7)
-        x = self.deconv(x)
-
-        x = torch.clamp(x, min=-1.0, max=1.0)
+        x = self.deconv(x) # [-1,1] b/c tanh
 
         return x
     
@@ -218,7 +216,7 @@ class CustomSACPolicy(SACPolicy):
         self.log_alpha = torch.nn.Parameter(torch.tensor(0.0, requires_grad=True))
 
         self.actor.optimizer = torch.optim.Adam(self.actor.parameters(), lr=5e-5)
-        self.critic.optimizer = torch.optim.Adam(self.critic.parameters(), lr=3e-4)
+        self.critic.optimizer = torch.optim.Adam(self.critic.parameters(), lr=8e-4)
         self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=1e-4)
 
         self.target_entropy = target_entropy
@@ -520,14 +518,19 @@ def make_vec_env(dataset, obj_classifier, num_envs, latent_dim):
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-gamma = 0.75
+gamma = 0.5
 latent_dim = 32
 batch_size = 1 # must be 1, use multiple environments for parallel episodes
 training_batch_size = 256 # gets to 7040 mb, use for rest
-num_train_envs = 32
-num_timesteps = 10
+num_train_envs = 24
+num_timesteps = 500
 train_data = train_dataloader(batch_size=batch_size, num_workers=0)
 obj_classifier = YOLO("yolo11n-cls.pt").to(device).eval()
+raw_obj_classifier = obj_classifier.model
+
+for param in raw_obj_classifier.parameters():
+    param.requires_grad = False
+
 train_envs = make_vec_env(train_data, obj_classifier, num_train_envs, latent_dim)
 
 num_test_envs = 10
@@ -558,6 +561,31 @@ model = ZarrSAC(
     verbose=1,
 )
 
+def apply_action_no_grad(obs_tensor, actions): 
+    perturbed_normalized_to_s = obs_tensor + actions # not [0,1]
+
+    orig_denormalized = denormalize_batch(obs_tensor) # [0,1] range
+    perturbed_denormalized = denormalize_batch(perturbed_normalized_to_s) # [0,1] range
+
+    perturbed_normalized_clamp = renormalize_batch(perturbed_denormalized).cpu()
+
+    with torch.no_grad():
+        orig_results = obj_classifier(orig_denormalized, verbose=False)
+        perturbed_results = obj_classifier(perturbed_denormalized, verbose=False)
+
+    return perturbed_normalized_clamp, orig_results, perturbed_results
+
+def apply_action_grad(obs_tensor, actions): 
+    perturbed_normalized_to_s = obs_tensor + actions # not [0,1]
+
+    orig_denormalized = denormalize_batch(obs_tensor) # [0,1] range
+    perturbed_denormalized = denormalize_batch(perturbed_normalized_to_s) # [0,1] range
+
+    orig_results = obj_classifier(orig_denormalized, verbose=False)
+    perturbed_probs, _ = raw_obj_classifier(perturbed_denormalized)
+
+    return orig_results, perturbed_probs
+
 def rollout(
     envs: DummyVecEnv, 
     policy: CustomSACPolicy,
@@ -568,7 +596,7 @@ def rollout(
 
     total_rewards = np.zeros((envs.num_envs))
     step_num = 0
-    curr_gamma = gamma
+    curr_gamma = 1
 
     while True:
         obs_batch = np.stack([env.batch for env in envs.envs]).squeeze(1)  # (num_envs, C, H, W)
@@ -579,16 +607,7 @@ def rollout(
         
         actions_npy = actions.cpu().numpy()
 
-        perturbed_normalized_to_s = obs_tensor + actions # not [0,1]
-
-        orig_denormalized = denormalize_batch(obs_tensor) # [0,1] range
-        perturbed_denormalized = denormalize_batch(perturbed_normalized_to_s) # [0,1] range
-
-        perturbed_normalized_clamp = renormalize_batch(perturbed_denormalized).cpu()
-    
-        with torch.no_grad():
-            orig_results = obj_classifier(orig_denormalized, verbose=False)
-            perturbed_results = obj_classifier(perturbed_denormalized, verbose=False)
+        perturbed_normalized_clamp, orig_results, perturbed_results = apply_action_no_grad(obs_tensor, actions)
 
         for i, env in enumerate(envs.envs):
             if step_num == 0: 
@@ -626,6 +645,7 @@ def train_model(
     actor_losses = []
     critic_losses = []
     alpha_losses = []
+    classification_losses = []
     l1_norms = []
     l2_norms = []
     smoothness_vals = []
@@ -640,19 +660,10 @@ def train_model(
         latent_actions = latent_actions.cpu().numpy()
         actions_npy = actions.cpu().numpy()
 
-        perturbed_normalized_to_s = obs_tensor + actions # not [0,1]
-
-        orig_denormalized = denormalize_batch(obs_tensor) # [0,1] range
-        perturbed_denormalized = denormalize_batch(perturbed_normalized_to_s) # [0,1] range
-
-        perturbed_normalized_clamp = renormalize_batch(perturbed_denormalized).cpu()
-    
-        with torch.no_grad():
-            orig_results = obj_classifier(orig_denormalized, verbose=False)
-            perturbed_results = obj_classifier(perturbed_denormalized, verbose=False)
+        perturbed_normalized_clamp, orig_results, perturbed_probs = apply_action_no_grad(obs_tensor, actions)
 
         for j, env in enumerate(train_envs.envs):
-            env.set_results(perturbed_normalized_clamp[j], orig_results[j], perturbed_results[j])
+            env.set_results(perturbed_normalized_clamp[j], orig_results[j], perturbed_probs[j])
 
         next_obs, rewards, dones, _ = train_envs.step(actions_npy)
 
@@ -684,41 +695,60 @@ def train_model(
                 # Actor update
                 new_actions_upsampled, new_actions, log_probs = policy.predict_action_with_prob_upsampling(latent_obs, deterministic=False)
 
+                # Assume the prediction from the classifier on the original image is the true result, even if that's not true
+                orig_results, perturbed_probs = apply_action_grad(batch.observations, new_actions_upsampled)
+
+                batched_true_classes = torch.tensor([orig_results[j].probs.top1 for j in range(batch_size)]).to("cuda")
+                # In [0, 1]
+                classification_loss = perturbed_probs.gather(1, batched_true_classes.view(-1, 1)).mean()
+
                 q_new_action_a, q_new_action_b = policy.critic(torch.cat([downsampled_obs, new_actions], dim=1))
                 l2_norm_loss = torch.norm(new_actions_upsampled, p=2, dim=(1, 2, 3)).mean()
-                smoothness_loss = torch.mean(torch.abs(new_actions_upsampled[:, :, :-1] - new_actions_upsampled[:, :, 1:])) + \
-                                  torch.mean(torch.abs(new_actions_upsampled[:, :-1, :] - new_actions_upsampled[:, 1:, :])) 
+                smoothness_loss = torch.abs(torch.diff(new_actions_upsampled, dim=2)).mean() + \
+                                  torch.abs(torch.diff(new_actions_upsampled, dim=1)).mean() 
                 l1_norm_loss = torch.norm(new_actions_upsampled, p=1, dim=(1, 2, 3)).mean()
                 # 1e-2, 1e-3, 1e-2 for Learned_main_1745897869.9799478.zip
                 # 1e-1, 1e-3, 5e-4 for Learned_main_1745940359.0014925.zip
                 # 1e-2, 0, 1e-4 for Learned_main_1745976187.284214.zip, with smooth top-k k=50, temp=0.2
                 # 1e-2, 0, 1e-4 for Learned_main_1745978720.9735777.zip, with smooth top-k k=50000, temp=0.75
                 # 1e-2, 1e-5, 1e-5 for Learned_main_1746032822.896086.zip, with smooth top-k k=50000, temp=0.9
+                # 1e-2, 0, 1e-5, 100 for Learned_main_1746154653.8339.zip: maintain classification, too much noise but perfect classifications
+                # 1e-2, 1e-5, 1e-2, 200 for Learned_main_1746198230.5772636.zip: maintain classification, too much noise but perfect classifications
                 actor_loss = (policy.alpha.detach() * log_probs - torch.min(q_new_action_a, q_new_action_b)).mean() + \
-                             1e-2 * l2_norm_loss + 1e-5 * smoothness_loss + 1e-5 * l1_norm_loss
-                actor_losses.append(actor_loss.cpu().detach().numpy())
-                l2_norms.append(l2_norm_loss.cpu().detach().numpy())
-                l1_norms.append(l1_norm_loss.cpu().detach().numpy())
-                smoothness_vals.append(smoothness_loss.cpu().detach().numpy())
+                             200 * classification_loss + \
+                             1e-2 * l2_norm_loss + \
+                             1e-5 * smoothness_loss + \
+                             1e-2 * l1_norm_loss
+                actor_losses.append(actor_loss.item())
+                classification_losses.append(classification_loss.item())
+                l2_norms.append(l2_norm_loss.item())
+                l1_norms.append(l1_norm_loss.item())
+                smoothness_vals.append(smoothness_loss.item())
+
+                # if i == 9: 
+                #     display_comp_graph(classification_loss, "perturbed_probs_comp_graph")
                 
                 actor_loss = actor_loss.to(policy.device)
 
                 # Critic update
                 current_q_a, current_q_b = policy.critic(torch.cat([downsampled_obs, batch.actions], dim=1))
                 critic_loss = F.mse_loss(current_q_a, target_q) + F.mse_loss(current_q_b, target_q)
-                critic_losses.append(critic_loss.cpu().detach().numpy())
+                critic_losses.append(critic_loss.item())
 
                 critic_loss = critic_loss.to(policy.device)
 
                 # Alpha update
                 alpha_loss = -(policy.log_alpha * (log_probs.detach() + policy.target_entropy)).mean()
-                alpha_losses.append(alpha_loss.cpu().detach().numpy())
+                alpha_losses.append(alpha_loss.item())
 
                 alpha_loss = alpha_loss.to(policy.device)
 
                 critic_loss.backward(retain_graph=True)
                 actor_loss.backward()
                 alpha_loss.backward()
+
+                # if i % 40 == 0: 
+                #     print(f"Mem summary at iter {i}: \n{torch.cuda.memory_summary()}\n\n")
 
                 policy.critic.optimizer.step()
                 policy.actor.optimizer.step()
@@ -746,6 +776,7 @@ def train_model(
         plot_per_step(l1_norms, 1, f"Learned_main_{time_save}_l1.png", "L1 Loss")
         plot_per_step(l2_norms, 1, f"Learned_main_{time_save}_l2.png", "L2 Loss")
         plot_per_step(smoothness_vals, 1, f"Learned_main_{time_save}_smoothness.png", "Smoothness Loss")
+        plot_per_step(classification_losses, 1, f"Learned_main_{time_save}_cls.png", "Classification Loss")
 
 
 # 1000 timesteps, 32 envs, batch size 256 takes 1 hr to run

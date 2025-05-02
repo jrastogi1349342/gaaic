@@ -25,15 +25,14 @@ def make_vec_env(dataset, obj_classifier, num_envs, latent_dim):
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-gamma = 0.75
+gamma = 0.5
 latent_dim = 32
 batch_size = 1 # must be 1, use multiple environments for parallel episodes
-training_batch_size = 64
-num_train_envs = 8
+num_val_envs = 8
 num_timesteps = 1000
-train_data = train_dataloader(batch_size=batch_size, num_workers=0)
+val_data = val_dataloader(batch_size=batch_size, num_workers=0)
 obj_classifier = YOLO("yolo11n-cls.pt").to(device).eval()
-train_envs = make_vec_env(train_data, obj_classifier, num_train_envs, latent_dim)
+train_envs = make_vec_env(val_data, obj_classifier, num_val_envs, latent_dim)
 
 encoder = Encoder(latent_dim=latent_dim, device=device)
 
@@ -44,13 +43,13 @@ model = ZarrSAC(
     policy_kwargs=dict(
         encoder=encoder,
         latent_dim=latent_dim,
-        batch_size=batch_size * num_train_envs,
+        batch_size=batch_size * num_val_envs,
         device=device
     ),
     verbose=1,
 )
 
-model.load(f"Learned_main_1746038941.135299.zip")
+model.load(f"Learned_main_1746198230.5772636.zip")
 
 def rollout(
     envs: DummyVecEnv, 
@@ -62,7 +61,7 @@ def rollout(
 
     total_rewards = np.zeros((envs.num_envs))
     step_num = 0
-    curr_gamma = gamma
+    curr_gamma = 1
 
     while True:
         obs_batch = np.stack([env.batch for env in envs.envs]).squeeze(1)  # (num_envs, C, H, W)
@@ -100,7 +99,7 @@ def rollout(
 
         step_num += 1
 
-        if step_num > max_steps or all(dones): 
+        if step_num > max_steps: 
             break
         
     return total_rewards.mean()
