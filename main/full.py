@@ -12,6 +12,7 @@ from typing import Callable, Optional
 from stable_baselines3.common.utils import polyak_update
 from tqdm import trange
 import time
+import gc
 
 import zarr
 from zarr.codecs import BloscCodec
@@ -37,6 +38,8 @@ parser.add_argument('--gamma', type=float, default=0.99, metavar='G',
                     help='discount factor (default: 0.99)')
 args = parser.parse_args()
 
+gc.collect()
+torch.cuda.empty_cache()
 
 # To run: python3 main/full.py
 
@@ -81,6 +84,7 @@ class PerturbationModel(nn.Module):
         ).to(device)
 
         # Gaussian distribution in latent space
+        # Note, mu and cov will error with Nan/Inf in backprop if float16 used
         self.mu = nn.Sequential(
             nn.Linear(latent_dim, latent_dim), 
             nn.LeakyReLU(inplace=True)
@@ -197,7 +201,7 @@ class CustomSACPolicy(SACPolicy):
     """
     implements both actor and critic in one model
     """
-    def __init__(self, observation_space, action_space, lr_schedule, encoder, latent_dim, batch_size, target_entropy=-5.0, device="cuda", **kwargs):
+    def __init__(self, observation_space, action_space, lr_schedule, encoder, latent_dim, batch_size, target_entropy=-8.0, device="cuda", **kwargs):
         super().__init__(observation_space, action_space, lr_schedule)
         self.feature_encoder = encoder
         self.batch_size = batch_size
@@ -215,9 +219,9 @@ class CustomSACPolicy(SACPolicy):
 
         self.log_alpha = torch.nn.Parameter(torch.tensor(0.0, requires_grad=True))
 
-        self.actor.optimizer = torch.optim.Adam(self.actor.parameters(), lr=5e-5)
-        self.critic.optimizer = torch.optim.Adam(self.critic.parameters(), lr=8e-4)
-        self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=1e-4)
+        self.actor.optimizer = torch.optim.Adam(self.actor.parameters(), lr=1e-4)
+        self.critic.optimizer = torch.optim.Adam(self.critic.parameters(), lr=5e-3)
+        self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=5e-4)
 
         self.target_entropy = target_entropy
 
@@ -261,6 +265,7 @@ class CustomSACPolicy(SACPolicy):
 
         return self.actor.decode(action).squeeze(0), dist.log_prob(action), values
 
+    # Note: unused, required
     def _predict(self, observation, deterministic = False):
         with torch.no_grad(): 
             observation = self.feature_encoder(observation)
@@ -322,16 +327,7 @@ class CustomSACPolicy(SACPolicy):
 
         actions_upsampled = self.actor.decode(actions).squeeze(0)
 
-        return actions_upsampled, actions, log_prob.unsqueeze(1)
-
-    def evaluate_actions(self, obs, actions): 
-        combined = torch.cat([self.feature_encoder(obs), actions], dim=1)
-        q1, q2 = self.critic(combined)
-
-        mu, std = self.actor(obs)
-        dist = torch.distributions.MultivariateNormal(mu, std)
-        log_prob = dist.log_prob(actions).sum(dim=-1, keepdim=True)
-        return q1, q2, log_prob
+        return observation, actions_upsampled, actions, log_prob.unsqueeze(1)
     
     @property
     def alpha(self): 
@@ -521,7 +517,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 gamma = 0.5
 latent_dim = 32
 batch_size = 1 # must be 1, use multiple environments for parallel episodes
-training_batch_size = 256 # gets to 7040 mb, use for rest
+training_batch_size = 248 # gets to 7040 mb, use for rest
 num_train_envs = 24
 num_timesteps = 500
 train_data = train_dataloader(batch_size=batch_size, num_workers=0)
@@ -673,11 +669,15 @@ def train_model(
             for _ in range(gradient_updates):
                 batch = replay_buffer.sample(batch_size)
 
+                policy.critic.optimizer.zero_grad()
+                policy.actor.optimizer.zero_grad()
+                policy.alpha_optimizer.zero_grad()
+
                 with torch.no_grad():
                     latent_obs = policy.feature_encoder(batch.observations)
                     latent_next_obs = policy.feature_encoder(batch.next_observations)
 
-                downsampled_obs = policy.actor.downsampled_enc(latent_obs)
+                # downsampled_obs = policy.actor.downsampled_enc(latent_obs)
                 downsampled_next_obs = policy.actor.downsampled_enc(latent_next_obs)
 
                 with torch.no_grad():
@@ -688,12 +688,8 @@ def train_model(
                     # TODO check if I need to detach alpha here, since in torch.no_grad()
                     target_q = batch.rewards.unsqueeze(1) + gamma * (1 - batch.dones.unsqueeze(1)) * (q_next - policy.alpha.detach() * next_log_probs)
 
-                policy.critic.optimizer.zero_grad()
-                policy.actor.optimizer.zero_grad()
-                policy.alpha_optimizer.zero_grad()
-
                 # Actor update
-                new_actions_upsampled, new_actions, log_probs = policy.predict_action_with_prob_upsampling(latent_obs, deterministic=False)
+                downsampled_obs, new_actions_upsampled, new_actions, log_probs = policy.predict_action_with_prob_upsampling(latent_obs, deterministic=False)
 
                 # Assume the prediction from the classifier on the original image is the true result, even if that's not true
                 orig_results, perturbed_probs = apply_action_grad(batch.observations, new_actions_upsampled)
@@ -703,22 +699,28 @@ def train_model(
                 classification_loss = perturbed_probs.gather(1, batched_true_classes.view(-1, 1)).mean()
 
                 q_new_action_a, q_new_action_b = policy.critic(torch.cat([downsampled_obs, new_actions], dim=1))
+                # Note: these norms are not on [0, 1] images
                 l2_norm_loss = torch.norm(new_actions_upsampled, p=2, dim=(1, 2, 3)).mean()
                 smoothness_loss = torch.abs(torch.diff(new_actions_upsampled, dim=2)).mean() + \
                                   torch.abs(torch.diff(new_actions_upsampled, dim=1)).mean() 
                 l1_norm_loss = torch.norm(new_actions_upsampled, p=1, dim=(1, 2, 3)).mean()
+
+                # L2, smoothness, L1, classification weights
                 # 1e-2, 1e-3, 1e-2 for Learned_main_1745897869.9799478.zip
                 # 1e-1, 1e-3, 5e-4 for Learned_main_1745940359.0014925.zip
                 # 1e-2, 0, 1e-4 for Learned_main_1745976187.284214.zip, with smooth top-k k=50, temp=0.2
                 # 1e-2, 0, 1e-4 for Learned_main_1745978720.9735777.zip, with smooth top-k k=50000, temp=0.75
                 # 1e-2, 1e-5, 1e-5 for Learned_main_1746032822.896086.zip, with smooth top-k k=50000, temp=0.9
-                # 1e-2, 0, 1e-5, 100 for Learned_main_1746154653.8339.zip: maintain classification, too much noise but perfect classifications
-                # 1e-2, 1e-5, 1e-2, 200 for Learned_main_1746198230.5772636.zip: maintain classification, too much noise but perfect classifications
+                # 1e-2, 0, 1e-5, 100 for Learned_main_1746154653.8339.zip: too much noise but perfect classifications
+                # 1e-2, 1e-5, 1e-2, 200 for Learned_main_1746198230.5772636.zip: too much noise but perfect classifications
+                # 1e-2, 1e-4, 5e-2, 300 for Learned_main_1746245278.3612838.zip: invisible noise for each step but worse classifications
+                # 1e-2, 1e-4, 3e-2, 500 for Learned_main_1746248347.6195297.zip: semi visible noise for each step, not much worse classifications
+                # 1e-2, 1e-4, 4e-2, 1000 for Learned_main_1746288507.925695.zip: semi visible noise for each step, decent classifications
                 actor_loss = (policy.alpha.detach() * log_probs - torch.min(q_new_action_a, q_new_action_b)).mean() + \
-                             200 * classification_loss + \
+                             1000 * classification_loss + \
                              1e-2 * l2_norm_loss + \
-                             1e-5 * smoothness_loss + \
-                             1e-2 * l1_norm_loss
+                             1e-4 * smoothness_loss + \
+                             4e-2 * l1_norm_loss
                 actor_losses.append(actor_loss.item())
                 classification_losses.append(classification_loss.item())
                 l2_norms.append(l2_norm_loss.item())

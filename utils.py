@@ -46,38 +46,3 @@ def plot_per_step(arr, freq, file_name, name):
     plt.grid(True)
     plt.savefig(file_name)
     plt.show()
-
-
-
-# def plot_actor_loss(actor_losses, freq, file_name): 
-#     plt.figure(figsize=(10, 6))
-#     plt.plot(range(1, len(actor_losses) + 1), actor_losses, label='Actor Losses')
-#     plt.xlabel(f'Episode (x{freq})')
-#     plt.ylabel('Loss')
-#     plt.title('Actor Loss over Timesteps')
-#     plt.grid(True)
-#     plt.savefig(file_name)
-#     plt.show()
-
-
-# def plot_critic_loss(critic_losses, freq, file_name): 
-#     plt.figure(figsize=(10, 6))
-#     plt.plot(range(1, len(critic_losses) + 1), critic_losses, label='Critic Losses')
-#     plt.xlabel(f'Episode (x{freq})')
-#     plt.ylabel('Loss')
-#     plt.title('Critic Loss over Timesteps')
-#     plt.grid(True)
-#     plt.savefig(file_name)
-#     plt.show()
-
-
-# def plot_alpha_loss(alpha_losses, freq, file_name): 
-#     plt.figure(figsize=(10, 6))
-#     plt.plot(range(1, len(alpha_losses) + 1), alpha_losses, label='Alpha Losses')
-#     plt.xlabel(f'Episode (x{freq})')
-#     plt.ylabel('Loss')
-#     plt.title('Alpha Loss over Timesteps')
-#     plt.grid(True)
-#     plt.savefig(file_name)
-#     plt.show()
-

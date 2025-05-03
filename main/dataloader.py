@@ -16,6 +16,9 @@ transform = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
+
+mean_cuda = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).to("cuda")
+std_cuda = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).to("cuda")
     
 def display_img(img): 
     mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
@@ -31,11 +34,11 @@ def display_img(img):
     plt.show()
 
 def denormalize_batch(images): 
-    mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).to("cuda")
-    std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).to("cuda")
+    # mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).to("cuda")
+    # std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).to("cuda")
 
     # Denormalize images
-    images = images * std + mean
+    images = images * std_cuda + mean_cuda
 
     # TODO come up with better expression for this that's still differentiable
     images = torch.sigmoid(4 * images - 2)
