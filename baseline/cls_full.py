@@ -1,5 +1,6 @@
 import torch
-from stable_baselines3 import SAC
+import torch.nn as nn
+import torchvision.models as models
 import sys
 import os
 from ultralytics import YOLO
@@ -9,10 +10,29 @@ import numpy as np
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from dataloader import train_dataloader, test_dataloader, val_dataloader, denormalize_batch, renormalize_batch, display_batch
 from environment import DataloaderEnv
-from full import Encoder, ZarrSAC, CustomSACPolicy
 
 from utils import *
 
+
+class Encoder(nn.Module): 
+    def __init__(self, pretrained=True, latent_dim=128, device="cuda"): 
+        super().__init__()
+        
+        model_base = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
+        # Yields 512 dim vector 
+        self.encoder = nn.Sequential(*list(model_base.children())[:-1]).to(device) # remove head
+
+        for param in self.encoder.parameters(): 
+            param.requires_grad = False
+
+        for module in self.encoder.modules():
+            if isinstance(module, torch.nn.BatchNorm2d):
+                module.train()
+
+    def forward(self, x): 
+        x = self.encoder(x).squeeze(-1).squeeze(-1)
+
+        return x
 
 
 def make_env_fn(dataset, obj_classifier, idx, latent_dim):
@@ -28,7 +48,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 gamma = 0.5
 latent_dim = 32
 batch_size = 1 # must be 1, use multiple environments for parallel episodes
-num_val_envs = 8
+num_val_envs = 32
 num_timesteps = 1000
 val_data = val_dataloader(batch_size=batch_size, num_workers=0)
 obj_classifier = YOLO("yolo11n-cls.pt").to(device).eval()
@@ -36,24 +56,9 @@ train_envs = make_vec_env(val_data, obj_classifier, num_val_envs, latent_dim)
 
 encoder = Encoder(latent_dim=latent_dim, device=device)
 
-model = ZarrSAC(
-    policy=CustomSACPolicy,
-    env=train_envs,
-    buffer_size=10_000, 
-    policy_kwargs=dict(
-        encoder=encoder,
-        latent_dim=latent_dim,
-        batch_size=batch_size * num_val_envs,
-        device=device
-    ),
-    verbose=1,
-)
-
-model.load(f"Learned_main_1746288507.925695.zip")
 
 def rollout(
     envs: DummyVecEnv, 
-    policy: CustomSACPolicy,
     gamma: float,
     max_steps: int = 50, 
 ): 
@@ -70,10 +75,9 @@ def rollout(
 
     while True:
         obs_batch = np.stack([env.batch for env in envs.envs]).squeeze(1)  # (num_envs, C, H, W)
-        obs_tensor = torch.from_numpy(obs_batch).to(policy.device) 
+        obs_tensor = torch.from_numpy(obs_batch).to(device) 
 
-        with torch.no_grad():
-            _, actions = policy.pred_upsampled_action(obs_tensor, deterministic=True)
+        actions = torch.clamp(torch.randn(obs_tensor.shape, device='cuda'), -1, 1)
 
         actions_npy = actions.cpu().numpy()
 
@@ -99,7 +103,6 @@ def rollout(
         # total_rewards += curr_gamma * rewards
         # curr_gamma *= gamma
 
-        # TODO figure out why this gives comparable values to standard normal dist, even though visually it looks different
         actions_denorm = denormalize_batch(actions)
         l1_norms.append(torch.norm(actions_denorm, p=1, dim=(1, 2, 3)).mean().item())
         l2_norms.append(torch.norm(actions_denorm, p=2, dim=(1, 2, 3)).mean().item())
@@ -114,12 +117,15 @@ def rollout(
                 num_eps_completed += 1
                 train_envs.env_method("reset", indices=idx)
 
+
         if step_num > max_steps: 
             break
         
     return np.array(l1_norms), np.array(l2_norms), (step_num * envs.num_envs / num_eps_completed)
 
-l1, l2, cls_num_steps = rollout(train_envs, model.policy, gamma=gamma, max_steps=num_timesteps)
+l1, l2, cls_num_steps = rollout(train_envs, gamma=gamma, max_steps=num_timesteps)
 
+# Result for gaussian noise: 
+# Avg L1 norm: 68348.60227272728  Avg L2 norm: 186.12226680180171 Avg num steps per episode: 1.0001248907206195
 # These norms are for [0,1] images
 print(f"Avg L1 norm: {np.mean(l1)}\tAvg L2 norm: {np.mean(l2)}\tAvg num steps per episode: {cls_num_steps}")
