@@ -112,6 +112,8 @@ class PerturbationModel(nn.Module):
             nn.BatchNorm2d(256), 
             nn.ReLU(inplace=True), 
 
+            nn.Dropout2d(p=0.2),
+
             nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1, bias=False), 
             nn.BatchNorm2d(128), 
             nn.ReLU(inplace=True), 
@@ -503,6 +505,39 @@ class ZarrSAC(SAC):
 
         return self
 
+class ResultConnector(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, perturbed_imgs, yolo_results):
+        # Save tensors for backward
+        # Perturbed_img has a lot behind it (x + delta x), [B, 3, W, H]
+        # Yolo_results is a detached tensor with the probability of the true classification, batched [B]
+        ctx.save_for_backward(perturbed_imgs, yolo_results)
+
+        return yolo_results
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        perturbed_imgs, _ = ctx.saved_tensors
+
+        # # perturbed_imgs = saved[0]
+        # # yolo_res = saved[1:]
+
+        # Pass value up to perturbed image
+        grad_pert_img = grad_output.view(perturbed_imgs.shape[0], 1, 1, 1).expand(perturbed_imgs.shape)
+
+        # Placeholder because need to have this
+        grad_yolo_res = grad_output
+
+        return (grad_pert_img, grad_yolo_res)
+    
+def results_to_tensor(true_results, pred_results, device="cuda"): 
+    result_list = []
+
+    for true, pred in zip(true_results, pred_results): 
+        result_list.append(pred.probs.data[true.probs.top1].item())
+
+    return torch.tensor(result_list, device=device)
+
 
 def make_env_fn(dataset, obj_classifier, idx, latent_dim):
     def _init():
@@ -517,16 +552,16 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 gamma = 0.5
 latent_dim = 32
 batch_size = 1 # must be 1, use multiple environments for parallel episodes
-training_batch_size = 248 # gets to 7040 mb, use for rest
-num_train_envs = 24
-num_timesteps = 500
+training_batch_size = 128
+num_train_envs = 64
+num_timesteps = 200
 gradient_update_freq = 64
 train_data = train_dataloader(batch_size=batch_size, num_workers=0)
 obj_classifier = YOLO("yolo11n-cls.pt").to(device).eval()
-raw_obj_classifier = obj_classifier.model
+# raw_obj_classifier = obj_classifier.model
 
-for param in raw_obj_classifier.parameters():
-    param.requires_grad = False
+# for param in raw_obj_classifier.parameters():
+#     param.requires_grad = False
 
 train_envs = make_vec_env(train_data, obj_classifier, num_train_envs, latent_dim)
 
@@ -535,12 +570,6 @@ test_data = test_dataloader(batch_size=batch_size, num_workers=0)
 eval_envs = make_vec_env(test_data, obj_classifier, num_test_envs, latent_dim)
 test_freq = 5 # every x timesteps in training
 time_save = time.time()
-
-# TODO look at: 
-# Consider SAC envs vs dataloader vs SubProcEnv
-# https://stable-baselines3.readthedocs.io/en/master/guide/vec_envs.html
-# https://stable-baselines3.readthedocs.io/en/master/common/monitor.html
-# https://stable-baselines3.readthedocs.io/en/master/guide/tensorboard.html
 
 
 encoder = Encoder(latent_dim=latent_dim, device=device)
@@ -579,9 +608,10 @@ def apply_action_grad(obs_tensor, actions):
     perturbed_denormalized = denormalize_batch(perturbed_normalized_to_s) # [0,1] range
 
     orig_results = obj_classifier(orig_denormalized, verbose=False)
-    perturbed_probs, _ = raw_obj_classifier(perturbed_denormalized)
+    perturbed_results = obj_classifier(perturbed_denormalized, verbose=False)
+    # perturbed_probs, _ = raw_obj_classifier(perturbed_denormalized)
 
-    return orig_results, perturbed_probs
+    return orig_results, perturbed_results, perturbed_denormalized
 
 def rollout(
     envs: DummyVecEnv, 
@@ -657,14 +687,18 @@ def train_model(
         latent_actions = latent_actions.cpu().numpy()
         actions_npy = actions.cpu().numpy()
 
-        perturbed_normalized_clamp, orig_results, perturbed_probs = apply_action_no_grad(obs_tensor, actions)
+        perturbed_normalized_clamp, orig_results, perturbed_results = apply_action_no_grad(obs_tensor, actions)
 
         for j, env in enumerate(train_envs.envs):
-            env.set_results(perturbed_normalized_clamp[j], orig_results[j], perturbed_probs[j])
+            env.set_results(perturbed_normalized_clamp[j], orig_results[j], perturbed_results[j])
 
         next_obs, rewards, dones, _ = train_envs.step(actions_npy)
 
         replay_buffer.add(obs_batch, next_obs, latent_actions, rewards, dones)
+
+        for idx, done in enumerate(dones):
+            if done.item():
+                train_envs.env_method("reset", indices=idx)
 
         if replay_buffer.length() >= 10_000:
             for _ in range(gradient_update_freq):
@@ -693,11 +727,17 @@ def train_model(
                 downsampled_obs, new_actions_upsampled, new_actions, log_probs = policy.predict_action_with_prob_upsampling(latent_obs, deterministic=False)
 
                 # Assume the prediction from the classifier on the original image is the true result, even if that's not true
-                orig_results, perturbed_probs = apply_action_grad(batch.observations, new_actions_upsampled)
+                orig_results, perturbed_results, perturbed_denormalized = apply_action_grad(batch.observations, new_actions_upsampled)
+                
+                # Detached tensor with the probability of the true classification, batched
+                formatted_probs = results_to_tensor(orig_results, perturbed_results)
+                # Formatted_probs but connected to computation graph for perturbed_denormalized
+                perturbed_outputs_grads = ResultConnector.apply(perturbed_denormalized, formatted_probs)
 
-                batched_true_classes = torch.tensor([orig_results[j].probs.top1 for j in range(batch_size)]).to("cuda")
+
                 # In [0, 1]
-                classification_loss = perturbed_probs.gather(1, batched_true_classes.view(-1, 1)).mean()
+                classification_loss = perturbed_outputs_grads.mean()
+                # classification_loss = perturbed_results.gather(1, batched_true_classes.view(-1, 1)).mean()
 
                 q_new_action_a, q_new_action_b = policy.critic(torch.cat([downsampled_obs, new_actions], dim=1))
                 # Note: these norms are not on [0, 1] images
@@ -717,11 +757,12 @@ def train_model(
                 # 1e-2, 1e-4, 5e-2, 300 for Learned_main_1746245278.3612838.zip: invisible noise for each step but worse classifications
                 # 1e-2, 1e-4, 3e-2, 500 for Learned_main_1746248347.6195297.zip: semi visible noise for each step, not much worse classifications
                 # 1e-2, 1e-4, 4e-2, 1000 for Learned_main_1746288507.925695.zip: semi visible noise for each step, decent classifications
+                # 1e-2, 1e-0, 1e-5, 100 for Learned_main_1747093838.8063166.zip: looks like shader, decent classifications, good numerical results, loss increases (good b/c learning, not overfitting)
                 actor_loss = (policy.alpha.detach() * log_probs - torch.min(q_new_action_a, q_new_action_b)).mean() + \
-                             1000 * classification_loss + \
+                             100 * classification_loss + \
                              1e-2 * l2_norm_loss + \
-                             1e-4 * smoothness_loss + \
-                             4e-2 * l1_norm_loss
+                             1e-0 * smoothness_loss + \
+                             1e-5 * l1_norm_loss
                 actor_losses.append(actor_loss.item())
                 classification_losses.append(classification_loss.item())
                 l2_norms.append(l2_norm_loss.item())
@@ -759,10 +800,6 @@ def train_model(
 
                 # Soft update target
                 polyak_update(policy.critic.parameters(), policy.critic_target.parameters(), tau)
-
-        for idx, done in enumerate(dones):
-            if done.item():
-                train_envs.env_method("reset", indices=idx)
 
         if i % test_freq == 0: 
             rollout_val = rollout(test_envs, policy, gamma)
