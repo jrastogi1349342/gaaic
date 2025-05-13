@@ -554,7 +554,7 @@ latent_dim = 32
 batch_size = 1 # must be 1, use multiple environments for parallel episodes
 training_batch_size = 128
 num_train_envs = 64
-num_timesteps = 200
+num_timesteps = 250
 gradient_update_freq = 64
 train_data = train_dataloader(batch_size=batch_size, num_workers=0)
 obj_classifier = YOLO("yolo11n-cls.pt").to(device).eval()
@@ -757,12 +757,16 @@ def train_model(
                 # 1e-2, 1e-4, 5e-2, 300 for Learned_main_1746245278.3612838.zip: invisible noise for each step but worse classifications
                 # 1e-2, 1e-4, 3e-2, 500 for Learned_main_1746248347.6195297.zip: semi visible noise for each step, not much worse classifications
                 # 1e-2, 1e-4, 4e-2, 1000 for Learned_main_1746288507.925695.zip: semi visible noise for each step, decent classifications
-                # 1e-2, 1e-0, 1e-5, 100 for Learned_main_1747093838.8063166.zip: looks like shader, decent classifications, good numerical results, loss increases (good b/c learning, not overfitting)
+                # 1e-2, 1e-0, 1e-5, 100 for Learned_main_1747093838.8063166.zip: looks like shader, decent classifications, good numerical results, loss increases (good b/c learning something)
+                # 1e-2, 1e-0, 2e-5, 200 for Learned_main_1747093838.8063166.zip: looks like shader, decent classifications, good numerical results, loss increases (good b/c learning something)
+                # Last 2 both give ~ same results with eval
+                # Still overfitting on reconstruction loss b/c learning simple shading
+                # TODO consider using variance regularization to bound sampled action/perceptual loss (mse on latent embeddings)
                 actor_loss = (policy.alpha.detach() * log_probs - torch.min(q_new_action_a, q_new_action_b)).mean() + \
-                             100 * classification_loss + \
+                             200 * classification_loss + \
                              1e-2 * l2_norm_loss + \
                              1e-0 * smoothness_loss + \
-                             1e-5 * l1_norm_loss
+                             2e-5 * l1_norm_loss
                 actor_losses.append(actor_loss.item())
                 classification_losses.append(classification_loss.item())
                 l2_norms.append(l2_norm_loss.item())
@@ -819,6 +823,5 @@ def train_model(
         plot_per_step(classification_losses, 1, f"Learned_main_{time_save}_cls.png", "Classification Loss")
 
 
-# 1000 timesteps, 32 envs, batch size 256 takes 1 hr to run
-train_model(model.env, eval_envs, model.policy, model.replay_buffer, total_timesteps=num_timesteps, batch_size=training_batch_size, gradient_update_freq=gradient_update_freq, gamma=gamma, test_freq=test_freq)
-model.save(f"Learned_main_{time_save}.zip")
+# train_model(model.env, eval_envs, model.policy, model.replay_buffer, total_timesteps=num_timesteps, batch_size=training_batch_size, gradient_update_freq=gradient_update_freq, gamma=gamma, test_freq=test_freq)
+# model.save(f"Learned_main_{time_save}.zip")
