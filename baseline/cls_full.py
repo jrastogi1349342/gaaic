@@ -52,7 +52,7 @@ num_val_envs = 32
 num_timesteps = 1000
 val_data = val_dataloader(batch_size=batch_size, num_workers=0)
 obj_classifier = YOLO("yolo11n-cls.pt").to(device).eval()
-train_envs = make_vec_env(val_data, obj_classifier, num_val_envs, latent_dim)
+val_envs = make_vec_env(val_data, obj_classifier, num_val_envs, latent_dim)
 
 encoder = Encoder(latent_dim=latent_dim, device=device)
 
@@ -65,8 +65,12 @@ def rollout(
     envs.reset()
 
     # for [0,1] normalized images
-    l1_norms = [] 
-    l2_norms = []
+    l1_norms_orig = [] 
+    l2_norms_orig = []
+    l1_norms_actions = [] 
+    l2_norms_actions = []
+    l1_norms_perturbed = [] 
+    l2_norms_perturbed = []
     num_eps_completed = 0
 
     # total_rewards = np.zeros((envs.num_envs))
@@ -104,28 +108,43 @@ def rollout(
         # curr_gamma *= gamma
 
         actions_denorm = denormalize_batch(actions)
-        l1_norms.append(torch.norm(actions_denorm, p=1, dim=(1, 2, 3)).mean().item())
-        l2_norms.append(torch.norm(actions_denorm, p=2, dim=(1, 2, 3)).mean().item())
+        l1_orig = torch.norm(obs_tensor, p=1, dim=(1, 2, 3)).mean().item()
+        l1_action = torch.norm(actions_denorm, p=1, dim=(1, 2, 3)).mean().item()
+        l1_perturbed = torch.norm(perturbed_normalized_clamp, p=1, dim=(1, 2, 3)).mean().item()
+        l2_orig = torch.norm(obs_tensor, p=2, dim=(1, 2, 3)).mean().item()
+        l2_action = torch.norm(actions_denorm, p=2, dim=(1, 2, 3)).mean().item()
+        l2_perturbed = torch.norm(perturbed_normalized_clamp, p=2, dim=(1, 2, 3)).mean().item()
+        
+        l1_norms_orig.append(l1_orig)
+        l2_norms_orig.append(l2_orig)
+        l1_norms_actions.append(l1_action)
+        l2_norms_actions.append(l2_action)
+        l1_norms_perturbed.append(l1_perturbed)
+        l2_norms_perturbed.append(l2_perturbed)
 
-        display_batch(obs_tensor)
-        display_batch(perturbed_normalized_clamp)
+        # display_batch(obs_tensor)
+        # display_batch(perturbed_normalized_clamp)
 
         step_num += 1
 
         for idx, done in enumerate(dones):
             if done.item():
                 num_eps_completed += 1
-                train_envs.env_method("reset", indices=idx)
+                val_envs.env_method("reset", indices=idx)
 
 
         if step_num > max_steps: 
             break
         
-    return np.array(l1_norms), np.array(l2_norms), (step_num * envs.num_envs / num_eps_completed)
+    return np.array(l1_norms_orig), np.array(l2_norms_orig), np.array(l1_norms_actions), np.array(l2_norms_actions), np.array(l1_norms_perturbed), np.array(l2_norms_perturbed), (step_num * envs.num_envs / num_eps_completed)
 
-l1, l2, cls_num_steps = rollout(train_envs, gamma=gamma, max_steps=num_timesteps)
+l1_orig, l2_orig, l1_action, l2_action, l1_full, l2_full, cls_num_steps = rollout(val_envs, gamma=gamma, max_steps=num_timesteps)
 
 # Result for gaussian noise: 
 # Avg L1 norm: 68348.60227272728  Avg L2 norm: 186.12226680180171 Avg num steps per episode: 1.0001248907206195
 # These norms are for [0,1] images
-print(f"Avg L1 norm: {np.mean(l1)}\tAvg L2 norm: {np.mean(l2)}\tAvg num steps per episode: {cls_num_steps}")
+# These norms are for [0,1] images
+print(f"""Avg L1 norm of original: {np.mean(l1_orig)}\tAvg L2 norm of action: {np.mean(l2_orig)}
+      \tAvg L1 norm of action: {np.mean(l1_action)}\tAvg L2 norm of action: {np.mean(l2_action)}
+      \tAvg L1 norm of perturbed img: {np.mean(l1_full)}\tAvg L2 norm of perturbed img: {np.mean(l2_full)}
+      \tAvg num steps per episode: {cls_num_steps}""")

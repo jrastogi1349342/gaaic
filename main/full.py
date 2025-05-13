@@ -220,7 +220,7 @@ class CustomSACPolicy(SACPolicy):
         self.log_alpha = torch.nn.Parameter(torch.tensor(0.0, requires_grad=True))
 
         self.actor.optimizer = torch.optim.Adam(self.actor.parameters(), lr=1e-4)
-        self.critic.optimizer = torch.optim.Adam(self.critic.parameters(), lr=5e-3)
+        self.critic.optimizer = torch.optim.Adam(self.critic.parameters(), lr=5e-5)
         self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=5e-4)
 
         self.target_entropy = target_entropy
@@ -520,6 +520,7 @@ batch_size = 1 # must be 1, use multiple environments for parallel episodes
 training_batch_size = 248 # gets to 7040 mb, use for rest
 num_train_envs = 24
 num_timesteps = 500
+gradient_update_freq = 64
 train_data = train_dataloader(batch_size=batch_size, num_workers=0)
 obj_classifier = YOLO("yolo11n-cls.pt").to(device).eval()
 raw_obj_classifier = obj_classifier.model
@@ -547,7 +548,7 @@ encoder = Encoder(latent_dim=latent_dim, device=device)
 model = ZarrSAC(
     policy=CustomSACPolicy,
     env=train_envs,
-    buffer_size=10_000, 
+    buffer_size=50_000, 
     policy_kwargs=dict(
         encoder=encoder,
         latent_dim=latent_dim,
@@ -629,7 +630,7 @@ def train_model(
     replay_buffer, 
     total_timesteps: int = 20,
     batch_size: int = 32,
-    gradient_updates: int = 1,
+    gradient_update_freq: int = 1,
     gamma: float = 0.95,
     tau: float = 0.005, 
     test_freq: float = 5, 
@@ -665,8 +666,8 @@ def train_model(
 
         replay_buffer.add(obs_batch, next_obs, latent_actions, rewards, dones)
 
-        if replay_buffer.length() >= batch_size:
-            for _ in range(gradient_updates):
+        if replay_buffer.length() >= 10_000:
+            for _ in range(gradient_update_freq):
                 batch = replay_buffer.sample(batch_size)
 
                 policy.critic.optimizer.zero_grad()
@@ -782,5 +783,5 @@ def train_model(
 
 
 # 1000 timesteps, 32 envs, batch size 256 takes 1 hr to run
-train_model(model.env, eval_envs, model.policy, model.replay_buffer, total_timesteps=num_timesteps, batch_size=training_batch_size, gamma=gamma, test_freq=test_freq)
+train_model(model.env, eval_envs, model.policy, model.replay_buffer, total_timesteps=num_timesteps, batch_size=training_batch_size, gradient_update_freq=gradient_update_freq, gamma=gamma, test_freq=test_freq)
 model.save(f"Learned_main_{time_save}.zip")

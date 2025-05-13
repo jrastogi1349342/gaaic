@@ -18,7 +18,7 @@ def calc_rewards(orig, perturbed, orig_results, perturbed_results, step_idx, don
     perturbed_probs = perturbed_results.probs
 
     same_class = True if orig_probs.top1 == perturbed_probs.top1 else False
-    conf_diff = perturbed_probs.top1conf - orig_probs.top1conf # negative is the direction I want, if the classes are the same
+    conf_diff = perturbed_probs.data[orig_probs.top1] - orig_probs.top1conf # negative is the direction I want, if the classes are the same
 
     if same_class:
         rewards[0] = -5 - 2.5 * conf_diff.item()
