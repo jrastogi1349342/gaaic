@@ -13,7 +13,7 @@ from stable_baselines3.common.utils import polyak_update
 from tqdm import trange
 import time
 import gc
-
+import lpips
 import zarr
 from zarr.codecs import BloscCodec
 
@@ -291,13 +291,13 @@ class CustomSACPolicy(SACPolicy):
             latent_state, mus, cov_mtxs = self.actor(resnet_state)
 
             if deterministic: 
-                actions = mus
+                deltas = mus
             else: 
                 dist = torch.distributions.MultivariateNormal(mus, covariance_matrix=cov_mtxs)
 
-                actions = dist.sample()
+                deltas = dist.sample()
 
-        return actions, self.actor.decode(actions).squeeze(0)
+        return deltas, self.actor.decode(latent_state + deltas).squeeze(0)
 
     # Note: observation is already latent vector
     def predict_action_with_prob(self, observation, deterministic = False):
@@ -305,14 +305,14 @@ class CustomSACPolicy(SACPolicy):
         log_prob = None
         
         if deterministic: 
-            actions = mus
+            deltas = mus
         else: 
             dist = torch.distributions.MultivariateNormal(mus, covariance_matrix=cov_mtxs)
 
-            actions = dist.sample()
-            log_prob = dist.log_prob(actions).unsqueeze(1)
+            deltas = dist.sample()
+            log_prob = dist.log_prob(deltas).unsqueeze(1)
 
-        return actions, torch.clamp(log_prob, min=-20, max=0)
+        return deltas, torch.clamp(log_prob, min=-20, max=0)
 
     # Note: observation is already latent vector
     def predict_action_with_prob_upsampling(self, observation, deterministic = False):
@@ -320,16 +320,16 @@ class CustomSACPolicy(SACPolicy):
         log_prob = None
         
         if deterministic: 
-            actions = mus
+            deltas = mus
         else: 
             dist = torch.distributions.MultivariateNormal(mus, covariance_matrix=cov_mtxs)
 
-            actions = dist.sample()
-            log_prob = dist.log_prob(actions)
+            deltas = dist.sample()
+            log_prob = dist.log_prob(deltas)
 
-        actions_upsampled = self.actor.decode(actions).squeeze(0)
+        actions_upsampled = self.actor.decode(observation + deltas).squeeze(0)
 
-        return observation, actions_upsampled, actions, log_prob.unsqueeze(1)
+        return observation, actions_upsampled, deltas, log_prob.unsqueeze(1)
     
     @property
     def alpha(self): 
@@ -570,6 +570,7 @@ test_data = test_dataloader(batch_size=batch_size, num_workers=0)
 eval_envs = make_vec_env(test_data, obj_classifier, num_test_envs, latent_dim)
 test_freq = 5 # every x timesteps in training
 time_save = time.time()
+lpips_model = lpips.LPIPS(net='alex', verbose=False).to(device)
 
 
 encoder = Encoder(latent_dim=latent_dim, device=device)
@@ -611,7 +612,7 @@ def apply_action_grad(obs_tensor, actions):
     perturbed_results = obj_classifier(perturbed_denormalized, verbose=False)
     # perturbed_probs, _ = raw_obj_classifier(perturbed_denormalized)
 
-    return orig_results, perturbed_results, perturbed_denormalized
+    return orig_results, perturbed_results, orig_denormalized, perturbed_denormalized
 
 def rollout(
     envs: DummyVecEnv, 
@@ -673,18 +674,21 @@ def train_model(
     critic_losses = []
     alpha_losses = []
     classification_losses = []
-    l1_norms = []
-    l2_norms = []
+    upsampled_l1_norms = []
+    upsampled_l2_norms = []
+    delta_l2_norms = []
     smoothness_vals = []
+    perceptual_losses = []
+    diversity_losses = []
 
     for i in trange(total_timesteps):
         obs_batch = np.stack([env.batch for env in train_envs.envs]).squeeze(1)  # (num_envs, C, H, W)
         obs_tensor = torch.from_numpy(obs_batch).to(policy.device) 
 
         with torch.no_grad():
-            latent_actions, actions = policy.pred_upsampled_action(obs_tensor, deterministic=False)
+            latent_deltas, actions = policy.pred_upsampled_action(obs_tensor, deterministic=False)
         
-        latent_actions = latent_actions.cpu().numpy()
+        latent_deltas = latent_deltas.cpu().numpy()
         actions_npy = actions.cpu().numpy()
 
         perturbed_normalized_clamp, orig_results, perturbed_results = apply_action_no_grad(obs_tensor, actions)
@@ -694,7 +698,7 @@ def train_model(
 
         next_obs, rewards, dones, _ = train_envs.step(actions_npy)
 
-        replay_buffer.add(obs_batch, next_obs, latent_actions, rewards, dones)
+        replay_buffer.add(obs_batch, next_obs, latent_deltas, rewards, dones)
 
         for idx, done in enumerate(dones):
             if done.item():
@@ -716,18 +720,18 @@ def train_model(
                 downsampled_next_obs = policy.actor.downsampled_enc(latent_next_obs)
 
                 with torch.no_grad():
-                    next_actions, next_log_probs = policy.predict_action_with_prob(latent_next_obs, deterministic=False)
-                    q_next_a, q_next_b = policy.critic_target(torch.cat([downsampled_next_obs, next_actions], dim=1))
+                    next_action_deltas, next_log_probs = policy.predict_action_with_prob(latent_next_obs, deterministic=False)
+                    q_next_a, q_next_b = policy.critic_target(torch.cat([downsampled_next_obs, next_action_deltas], dim=1))
                     q_next = torch.min(q_next_a, q_next_b)
 
                     # TODO check if I need to detach alpha here, since in torch.no_grad()
                     target_q = batch.rewards.unsqueeze(1) + gamma * (1 - batch.dones.unsqueeze(1)) * (q_next - policy.alpha.detach() * next_log_probs)
 
                 # Actor update
-                downsampled_obs, new_actions_upsampled, new_actions, log_probs = policy.predict_action_with_prob_upsampling(latent_obs, deterministic=False)
+                downsampled_obs, new_actions_upsampled, new_action_deltas, log_probs = policy.predict_action_with_prob_upsampling(latent_obs, deterministic=False)
 
                 # Assume the prediction from the classifier on the original image is the true result, even if that's not true
-                orig_results, perturbed_results, perturbed_denormalized = apply_action_grad(batch.observations, new_actions_upsampled)
+                orig_results, perturbed_results, orig_denormalized, perturbed_denormalized = apply_action_grad(batch.observations, new_actions_upsampled)
                 
                 # Detached tensor with the probability of the true classification, batched
                 formatted_probs = results_to_tensor(orig_results, perturbed_results)
@@ -739,12 +743,20 @@ def train_model(
                 classification_loss = perturbed_outputs_grads.mean()
                 # classification_loss = perturbed_results.gather(1, batched_true_classes.view(-1, 1)).mean()
 
-                q_new_action_a, q_new_action_b = policy.critic(torch.cat([downsampled_obs, new_actions], dim=1))
+                q_new_action_a, q_new_action_b = policy.critic(torch.cat([downsampled_obs, new_action_deltas], dim=1))
                 # Note: these norms are not on [0, 1] images
                 l2_norm_loss = torch.norm(new_actions_upsampled, p=2, dim=(1, 2, 3)).mean()
                 smoothness_loss = torch.abs(torch.diff(new_actions_upsampled, dim=2)).mean() + \
                                   torch.abs(torch.diff(new_actions_upsampled, dim=1)).mean() 
                 l1_norm_loss = torch.norm(new_actions_upsampled, p=1, dim=(1, 2, 3)).mean()
+                l2_norm_loss_deltas = torch.norm(new_action_deltas, p=2, dim=1).mean()
+                perceptual_loss = lpips_model.forward(2 * orig_denormalized - 1, 2 * perturbed_denormalized - 1).mean()
+
+                deltas_flat = new_action_deltas.view(batch_size, -1)
+                deltas_norm = F.normalize(deltas_flat, p=2, dim=1)  # [B, N]
+                cos_sim_matrix = torch.matmul(deltas_norm, deltas_norm.T)  # [B, B]
+                diversity_loss = (cos_sim_matrix - torch.eye(batch_size, device=new_action_deltas.device)).mean()
+
 
                 # L2, smoothness, L1, classification weights
                 # 1e-2, 1e-3, 1e-2 for Learned_main_1745897869.9799478.zip
@@ -759,19 +771,25 @@ def train_model(
                 # 1e-2, 1e-4, 4e-2, 1000 for Learned_main_1746288507.925695.zip: semi visible noise for each step, decent classifications
                 # 1e-2, 1e-0, 1e-5, 100 for Learned_main_1747093838.8063166.zip: looks like shader, decent classifications, good numerical results, loss increases (good b/c learning something)
                 # 1e-2, 1e-0, 2e-5, 200 for Learned_main_1747093838.8063166.zip: looks like shader, decent classifications, good numerical results, loss increases (good b/c learning something)
-                # Last 2 both give ~ same results with eval
+                # Last 2 both give ~ same results with eval (~37k L1, ~97 L2)
                 # Still overfitting on reconstruction loss b/c learning simple shading
                 # TODO consider using variance regularization to bound sampled action/perceptual loss (mse on latent embeddings)
                 actor_loss = (policy.alpha.detach() * log_probs - torch.min(q_new_action_a, q_new_action_b)).mean() + \
-                             200 * classification_loss + \
+                             2e1 * classification_loss + \
                              1e-2 * l2_norm_loss + \
-                             1e-0 * smoothness_loss + \
-                             2e-5 * l1_norm_loss
+                             0e0 * smoothness_loss + \
+                             2e-5 * l1_norm_loss + \
+                             1e0 * l2_norm_loss_deltas + \
+                             2e1 * perceptual_loss + \
+                             2e1 * diversity_loss
                 actor_losses.append(actor_loss.item())
                 classification_losses.append(classification_loss.item())
-                l2_norms.append(l2_norm_loss.item())
-                l1_norms.append(l1_norm_loss.item())
+                upsampled_l2_norms.append(l2_norm_loss.item())
+                upsampled_l1_norms.append(l1_norm_loss.item())
                 smoothness_vals.append(smoothness_loss.item())
+                delta_l2_norms.append(l2_norm_loss_deltas.item())
+                perceptual_losses.append(perceptual_loss.item())
+                diversity_losses.append(diversity_loss.item())
 
                 # if i == 9: 
                 #     display_comp_graph(classification_loss, "perturbed_probs_comp_graph")
@@ -817,11 +835,14 @@ def train_model(
         plot_per_step(actor_losses, 1, f"Learned_main_{time_save}_actor.png", "Actor Loss")
         plot_per_step(critic_losses, 1, f"Learned_main_{time_save}_critic.png", "Critic Loss")
         plot_per_step(alpha_losses, 1, f"Learned_main_{time_save}_alpha.png", "Alpha Loss")
-        plot_per_step(l1_norms, 1, f"Learned_main_{time_save}_l1.png", "L1 Loss")
-        plot_per_step(l2_norms, 1, f"Learned_main_{time_save}_l2.png", "L2 Loss")
+        plot_per_step(upsampled_l1_norms, 1, f"Learned_main_{time_save}_l1.png", "Upsampled L1 Loss")
+        plot_per_step(upsampled_l2_norms, 1, f"Learned_main_{time_save}_l2.png", "Upsampled L2 Loss")
         plot_per_step(smoothness_vals, 1, f"Learned_main_{time_save}_smoothness.png", "Smoothness Loss")
         plot_per_step(classification_losses, 1, f"Learned_main_{time_save}_cls.png", "Classification Loss")
+        plot_per_step(delta_l2_norms, 1, f"Learned_main_{time_save}_latent_l2.png", "Latent Action L2 Loss")
+        plot_per_step(perceptual_losses, 1, f"Learned_main_{time_save}_perceptual.png", "LPIPS Perceptual Loss")
+        plot_per_step(diversity_losses, 1, f"Learned_main_{time_save}_diversity.png", "Diversity Loss")
 
 
-# train_model(model.env, eval_envs, model.policy, model.replay_buffer, total_timesteps=num_timesteps, batch_size=training_batch_size, gradient_update_freq=gradient_update_freq, gamma=gamma, test_freq=test_freq)
-# model.save(f"Learned_main_{time_save}.zip")
+train_model(model.env, eval_envs, model.policy, model.replay_buffer, total_timesteps=num_timesteps, batch_size=training_batch_size, gradient_update_freq=gradient_update_freq, gamma=gamma, test_freq=test_freq)
+model.save(f"Learned_main_{time_save}.zip")

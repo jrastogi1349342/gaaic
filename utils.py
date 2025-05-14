@@ -40,7 +40,7 @@ def plot_learning_curve(avg_rewards, freq, file_name):
 def plot_per_step(arr, freq, file_name, name): 
     plt.figure(figsize=(10, 6))
     plt.plot(range(1, len(arr) + 1), arr, label=name)
-    plt.xlabel(f'Episode (x{freq})')
+    plt.xlabel(f'Gradient Update (x{freq})')
     plt.ylabel('Loss')
     plt.title(f'{name} over Timesteps')
     plt.grid(True)

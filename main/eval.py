@@ -49,7 +49,7 @@ model = ZarrSAC(
     verbose=1,
 )
 
-model.load(f"Learned_main_1747093838.8063166.zip")
+model.load(f"Learned_main_1747179504.425404.zip")
 
 def rollout(
     envs: DummyVecEnv, 
@@ -119,8 +119,8 @@ def rollout(
         l1_norms_perturbed.append(l1_perturbed)
         l2_norms_perturbed.append(l2_perturbed)
 
-        display_batch(obs_tensor)
-        display_batch(perturbed_normalized_clamp)
+        # display_batch(obs_tensor)
+        # display_batch(perturbed_normalized_clamp)
 
         step_num += 1
 
