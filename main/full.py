@@ -97,33 +97,39 @@ class PerturbationModel(nn.Module):
         
         # 154 MB VRAM for fc and deconv combined
         self.fc = nn.Sequential(
-            nn.Linear(latent_dim, 1024 * 7 * 7), 
-            nn.BatchNorm1d(1024 * 7 * 7),
+            nn.Linear(latent_dim, 256 * 14 * 14), 
+            nn.BatchNorm1d(256 * 14 * 14),
             nn.ReLU(inplace=True)
         ).to(device)
 
         # TODO optimize memory with groups, fusing conv and batchnorm, etc if possible
         self.deconv = nn.Sequential(
-            nn.ConvTranspose2d(1024, 512, kernel_size=4, stride=2, padding=1, bias=False), 
-            nn.BatchNorm2d(512), 
+            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1, bias=False), 
+            nn.GroupNorm(8, 128), 
             nn.ReLU(inplace=True), 
 
-            nn.ConvTranspose2d(512, 256, kernel_size=4, stride=2, padding=1, bias=False), 
-            nn.BatchNorm2d(256), 
+            nn.Dropout2d(p=0.3),
+
+            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1, bias=False), 
+            nn.GroupNorm(8, 64), 
             nn.ReLU(inplace=True), 
 
             nn.Dropout2d(p=0.2),
 
-            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1, bias=False), 
-            nn.BatchNorm2d(128), 
-            nn.ReLU(inplace=True), 
+            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1, bias=False), 
+            nn.GroupNorm(8, 32), 
+            nn.ReLU(inplace=True)
+        ).to(device)
 
-            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1, bias=False), 
-            nn.BatchNorm2d(64), 
-            nn.ReLU(inplace=True), 
-
-            nn.ConvTranspose2d(64, 3, kernel_size=4, stride=2, padding=1, bias=False), 
+        self.residual_out = nn.Sequential(
+            nn.ConvTranspose2d(32, 3, kernel_size=4, stride=2, padding=1, bias=False).to(device), 
             nn.Tanh()
+        )
+
+        # Gating mask (same spatial resolution as output)
+        self.gate = nn.Sequential(
+            nn.ConvTranspose2d(256, 3, kernel_size=32, stride=16, padding=8),
+            nn.Sigmoid()  # soft gate ∈ (0,1)
         ).to(device)
 
     # a = pi(s), for latent state s
@@ -151,10 +157,14 @@ class PerturbationModel(nn.Module):
     def decode(self, x):
         x = self.fc(x)
 
-        x = x.view(x.size(0), 1024, 7, 7)
-        x = self.deconv(x) # [-1,1] b/c tanh
+        x = x.view(x.size(0), 256, 14, 14)
+        main_deconv = self.deconv(x) # [B, 32, H, W]
+        residual = self.residual_out(main_deconv) # [B, 3, H, W]
+        gate_mask = self.gate(x)
 
-        return x
+        sparse_residual = residual * gate_mask
+
+        return sparse_residual, gate_mask
     
     # Bound L2 norm
     def bound_l2(self, perturbation): 
@@ -223,7 +233,7 @@ class CustomSACPolicy(SACPolicy):
 
         self.actor.optimizer = torch.optim.Adam(self.actor.parameters(), lr=1e-4)
         self.critic.optimizer = torch.optim.Adam(self.critic.parameters(), lr=5e-5)
-        self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=5e-4)
+        self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=1e-6)
 
         self.target_entropy = target_entropy
 
@@ -297,7 +307,10 @@ class CustomSACPolicy(SACPolicy):
 
                 deltas = dist.sample()
 
-        return deltas, self.actor.decode(latent_state + deltas).squeeze(0)
+            decoded, _ = self.actor.decode(latent_state + deltas)
+            decoded = decoded.squeeze(0)
+
+        return deltas, decoded
 
     # Note: observation is already latent vector
     def predict_action_with_prob(self, observation, deterministic = False):
@@ -327,9 +340,10 @@ class CustomSACPolicy(SACPolicy):
             deltas = dist.sample()
             log_prob = dist.log_prob(deltas)
 
-        actions_upsampled = self.actor.decode(observation + deltas).squeeze(0)
+        actions_upsampled, gate_mask = self.actor.decode(observation + deltas)
+        actions_upsampled = actions_upsampled.squeeze(0)
 
-        return observation, actions_upsampled, deltas, log_prob.unsqueeze(1)
+        return observation, actions_upsampled, gate_mask, deltas, log_prob.unsqueeze(1)
     
     @property
     def alpha(self): 
@@ -553,9 +567,9 @@ gamma = 0.5
 latent_dim = 32
 batch_size = 1 # must be 1, use multiple environments for parallel episodes
 training_batch_size = 128
-num_train_envs = 64
-num_timesteps = 250
-gradient_update_freq = 64
+num_train_envs = 128
+num_timesteps = 100
+gradient_update_freq = 128
 train_data = train_dataloader(batch_size=batch_size, num_workers=0)
 obj_classifier = YOLO("yolo11n-cls.pt").to(device).eval()
 # raw_obj_classifier = obj_classifier.model
@@ -570,7 +584,7 @@ test_data = test_dataloader(batch_size=batch_size, num_workers=0)
 eval_envs = make_vec_env(test_data, obj_classifier, num_test_envs, latent_dim)
 test_freq = 5 # every x timesteps in training
 time_save = time.time()
-lpips_model = lpips.LPIPS(net='alex', verbose=False).to(device)
+lpips_model = lpips.LPIPS(net='alex', spatial=True, verbose=False).to(device)
 
 
 encoder = Encoder(latent_dim=latent_dim, device=device)
@@ -613,6 +627,10 @@ def apply_action_grad(obs_tensor, actions):
     # perturbed_probs, _ = raw_obj_classifier(perturbed_denormalized)
 
     return orig_results, perturbed_results, orig_denormalized, perturbed_denormalized
+
+# x in [0,1]
+def brightness(x):
+    return 0.299 * x[:, 0:1] + 0.587 * x[:, 1:2] + 0.114 * x[:, 2:3]
 
 def rollout(
     envs: DummyVecEnv, 
@@ -674,12 +692,18 @@ def train_model(
     critic_losses = []
     alpha_losses = []
     classification_losses = []
-    upsampled_l1_norms = []
-    upsampled_l2_norms = []
-    delta_l2_norms = []
-    smoothness_vals = []
+    # upsampled_l1_norms = []
+    # upsampled_l2_norms = []
+    # delta_l2_norms = []
+    # smoothness_vals = []
     perceptual_losses = []
-    diversity_losses = []
+    # latent_diversity_losses = []
+    # upsampled_diversity_losses = []
+    # brightness_losses = []
+    gate_binary_losses = []
+    gate_sparsity_losses = []
+    large_perturb_losses = []
+    small_penalty_losses = []
 
     for i in trange(total_timesteps):
         obs_batch = np.stack([env.batch for env in train_envs.envs]).squeeze(1)  # (num_envs, C, H, W)
@@ -728,7 +752,7 @@ def train_model(
                     target_q = batch.rewards.unsqueeze(1) + gamma * (1 - batch.dones.unsqueeze(1)) * (q_next - policy.alpha.detach() * next_log_probs)
 
                 # Actor update
-                downsampled_obs, new_actions_upsampled, new_action_deltas, log_probs = policy.predict_action_with_prob_upsampling(latent_obs, deterministic=False)
+                downsampled_obs, new_actions_upsampled, gate_mask, new_action_deltas, log_probs = policy.predict_action_with_prob_upsampling(latent_obs, deterministic=False)
 
                 # Assume the prediction from the classifier on the original image is the true result, even if that's not true
                 orig_results, perturbed_results, orig_denormalized, perturbed_denormalized = apply_action_grad(batch.observations, new_actions_upsampled)
@@ -745,17 +769,41 @@ def train_model(
 
                 q_new_action_a, q_new_action_b = policy.critic(torch.cat([downsampled_obs, new_action_deltas], dim=1))
                 # Note: these norms are not on [0, 1] images
-                l2_norm_loss = torch.norm(new_actions_upsampled, p=2, dim=(1, 2, 3)).mean()
-                smoothness_loss = torch.abs(torch.diff(new_actions_upsampled, dim=2)).mean() + \
-                                  torch.abs(torch.diff(new_actions_upsampled, dim=1)).mean() 
-                l1_norm_loss = torch.norm(new_actions_upsampled, p=1, dim=(1, 2, 3)).mean()
-                l2_norm_loss_deltas = torch.norm(new_action_deltas, p=2, dim=1).mean()
-                perceptual_loss = lpips_model.forward(2 * orig_denormalized - 1, 2 * perturbed_denormalized - 1).mean()
+                # l2_norm_loss = torch.norm(new_actions_upsampled, p=2, dim=(1, 2, 3)).mean()
+                # smoothness_loss = torch.abs(torch.diff(new_actions_upsampled, dim=2)).mean() + \
+                #                   torch.abs(torch.diff(new_actions_upsampled, dim=1)).mean() 
+                # l1_norm_loss = torch.norm(new_actions_upsampled, p=1, dim=(1, 2, 3)).mean()
+                # l2_norm_loss_deltas = torch.norm(new_action_deltas, p=2, dim=1).mean()
 
-                deltas_flat = new_action_deltas.view(batch_size, -1)
-                deltas_norm = F.normalize(deltas_flat, p=2, dim=1)  # [B, N]
-                cos_sim_matrix = torch.matmul(deltas_norm, deltas_norm.T)  # [B, B]
-                diversity_loss = (cos_sim_matrix - torch.eye(batch_size, device=new_action_deltas.device)).mean()
+                # Harder selection
+                gate_binary_loss = torch.mean(gate_mask * (1 - gate_mask))
+                gate_sparsity_loss = torch.mean(gate_mask) # few active pixels
+
+                change_magnitude = torch.abs(new_actions_upsampled)  # [B, 3, H, W]
+                above_thresh = (change_magnitude > 0.4).float()
+
+                large_perturb_loss = -torch.mean(above_thresh)  # encourage more pixels > 0.4
+                small_penalty_loss = torch.mean(change_magnitude * (1 - above_thresh))
+
+                orig_gated_rescaled = 2 * (orig_denormalized * gate_mask) - 1
+                perturbed_gated_rescaled = 2 * (perturbed_denormalized * gate_mask) - 1
+
+                lpips_map = lpips_model.forward(orig_gated_rescaled, perturbed_gated_rescaled)
+                perceptual_weight = 1.0 - change_magnitude
+                perceptual_loss = (lpips_map * perceptual_weight).mean()
+
+                # deltas_flat = new_action_deltas.view(batch_size, -1)
+                # delta_centered = deltas_flat - deltas_flat.mean(dim=0, keepdim=True)
+                # deltas_norm = F.normalize(delta_centered, p=2, dim=1)  # [B, N]
+                # delta_cos_sims = torch.matmul(deltas_norm, deltas_norm.T)  # [B, B]
+                # latent_diversity_loss = delta_cos_sims[~torch.eye(batch_size, dtype=torch.bool, device=new_action_deltas.device)].mean()
+
+                # flat_upsampled = new_actions_upsampled.view(batch_size, -1)
+                # normed_upsampled = F.normalize(flat_upsampled, p=2, dim=1)
+                # cos_sim_upsampled = (normed_upsampled @ normed_upsampled.T)
+                # decoder_diversity_loss = cos_sim_upsampled[~torch.eye(batch_size, dtype=torch.bool, device=new_actions_upsampled.device)].mean()
+
+                brightness_loss = F.mse_loss(brightness(orig_denormalized), brightness(perturbed_denormalized))
 
 
                 # L2, smoothness, L1, classification weights
@@ -775,21 +823,33 @@ def train_model(
                 # Still overfitting on reconstruction loss b/c learning simple shading
                 # TODO consider using variance regularization to bound sampled action/perceptual loss (mse on latent embeddings)
                 actor_loss = (policy.alpha.detach() * log_probs - torch.min(q_new_action_a, q_new_action_b)).mean() + \
-                             2e1 * classification_loss + \
-                             1e-2 * l2_norm_loss + \
-                             0e0 * smoothness_loss + \
-                             2e-5 * l1_norm_loss + \
-                             1e0 * l2_norm_loss_deltas + \
-                             2e1 * perceptual_loss + \
-                             2e1 * diversity_loss
+                             5e1 * classification_loss + \
+                             5e0 * perceptual_loss + \
+                             1e1 * gate_binary_loss + \
+                             2e1 * gate_sparsity_loss + \
+                             5e1 * large_perturb_loss + \
+                             1e1 * small_penalty_loss + \
+                             1e3 * brightness_loss
+                            #  1e-1 * l2_norm_loss + \
+                            #  0e0 * smoothness_loss + \
+                            #  2e-3 * l1_norm_loss + \
+                            #  2e0 * l2_norm_loss_deltas + \
+                            #  2e1 * latent_diversity_loss + \
+                            #  5e2 * decoder_diversity_loss + \
                 actor_losses.append(actor_loss.item())
                 classification_losses.append(classification_loss.item())
-                upsampled_l2_norms.append(l2_norm_loss.item())
-                upsampled_l1_norms.append(l1_norm_loss.item())
-                smoothness_vals.append(smoothness_loss.item())
-                delta_l2_norms.append(l2_norm_loss_deltas.item())
+                # upsampled_l2_norms.append(l2_norm_loss.item())
+                # upsampled_l1_norms.append(l1_norm_loss.item())
+                # smoothness_vals.append(smoothness_loss.item())
+                # delta_l2_norms.append(l2_norm_loss_deltas.item())
                 perceptual_losses.append(perceptual_loss.item())
-                diversity_losses.append(diversity_loss.item())
+                # latent_diversity_losses.append(latent_diversity_loss.item())
+                # upsampled_diversity_losses.append(decoder_diversity_loss.item())
+                # brightness_losses.append(brightness_loss.item())
+                gate_binary_losses.append(gate_binary_loss.item())
+                gate_sparsity_losses.append(gate_sparsity_loss.item())
+                large_perturb_losses.append(large_perturb_loss.item())
+                small_penalty_losses.append(small_penalty_loss.item())
 
                 # if i == 9: 
                 #     display_comp_graph(classification_loss, "perturbed_probs_comp_graph")
@@ -835,13 +895,19 @@ def train_model(
         plot_per_step(actor_losses, 1, f"Learned_main_{time_save}_actor.png", "Actor Loss")
         plot_per_step(critic_losses, 1, f"Learned_main_{time_save}_critic.png", "Critic Loss")
         plot_per_step(alpha_losses, 1, f"Learned_main_{time_save}_alpha.png", "Alpha Loss")
-        plot_per_step(upsampled_l1_norms, 1, f"Learned_main_{time_save}_l1.png", "Upsampled L1 Loss")
-        plot_per_step(upsampled_l2_norms, 1, f"Learned_main_{time_save}_l2.png", "Upsampled L2 Loss")
-        plot_per_step(smoothness_vals, 1, f"Learned_main_{time_save}_smoothness.png", "Smoothness Loss")
+        # plot_per_step(upsampled_l1_norms, 1, f"Learned_main_{time_save}_l1.png", "Upsampled L1 Loss")
+        # plot_per_step(upsampled_l2_norms, 1, f"Learned_main_{time_save}_l2.png", "Upsampled L2 Loss")
+        # plot_per_step(smoothness_vals, 1, f"Learned_main_{time_save}_smoothness.png", "Smoothness Loss")
         plot_per_step(classification_losses, 1, f"Learned_main_{time_save}_cls.png", "Classification Loss")
-        plot_per_step(delta_l2_norms, 1, f"Learned_main_{time_save}_latent_l2.png", "Latent Action L2 Loss")
-        plot_per_step(perceptual_losses, 1, f"Learned_main_{time_save}_perceptual.png", "LPIPS Perceptual Loss")
-        plot_per_step(diversity_losses, 1, f"Learned_main_{time_save}_diversity.png", "Diversity Loss")
+        # plot_per_step(delta_l2_norms, 1, f"Learned_main_{time_save}_latent_l2.png", "Latent Action L2 Loss")
+        # plot_per_step(perceptual_losses, 1, f"Learned_main_{time_save}_perceptual.png", "LPIPS Perceptual Loss")
+        # plot_per_step(latent_diversity_losses, 1, f"Learned_main_{time_save}_latent_diversity.png", "Latent Diversity Loss")
+        # plot_per_step(upsampled_diversity_losses, 1, f"Learned_main_{time_save}_upsampled_diversity.png", "Decoder Diversity Loss")
+        # plot_per_step(brightness_losses, 1, f"Learned_main_{time_save}_brightness.png", "Brightness Loss")
+        plot_per_step(gate_binary_losses, 1, f"Learned_main_{time_save}_gate_binary.png", "Gate Binary Loss")
+        plot_per_step(gate_sparsity_losses, 1, f"Learned_main_{time_save}_gate_sparsity.png", "Gate Sparsity Loss")
+        plot_per_step(large_perturb_losses, 1, f"Learned_main_{time_save}_large_perturbs.png", "Large Perturbation Loss")
+        plot_per_step(small_penalty_losses, 1, f"Learned_main_{time_save}_small_penalty.png", "Small Penalty Loss")
 
 
 train_model(model.env, eval_envs, model.policy, model.replay_buffer, total_timesteps=num_timesteps, batch_size=training_batch_size, gradient_update_freq=gradient_update_freq, gamma=gamma, test_freq=test_freq)
