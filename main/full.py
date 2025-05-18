@@ -161,6 +161,8 @@ class PerturbationModel(nn.Module):
         main_deconv = self.deconv(x) # [B, 32, H, W]
         residual = self.residual_out(main_deconv) # [B, 3, H, W]
         gate_mask = self.gate(x)
+        gate_mask = gate_mask / (gate_mask.sum(dim=(2, 3), keepdim=True) + 1e-6)
+        gate_mask = gate_mask * (0.01 * 224 * 224)
 
         sparse_residual = residual * gate_mask
 
@@ -233,7 +235,7 @@ class CustomSACPolicy(SACPolicy):
 
         self.actor.optimizer = torch.optim.Adam(self.actor.parameters(), lr=1e-4)
         self.critic.optimizer = torch.optim.Adam(self.critic.parameters(), lr=5e-5)
-        self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=1e-6)
+        self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=5e-5)
 
         self.target_entropy = target_entropy
 
@@ -307,10 +309,10 @@ class CustomSACPolicy(SACPolicy):
 
                 deltas = dist.sample()
 
-            decoded, _ = self.actor.decode(latent_state + deltas)
+            decoded, gate_mask = self.actor.decode(latent_state + deltas)
             decoded = decoded.squeeze(0)
 
-        return deltas, decoded
+        return deltas, decoded, gate_mask
 
     # Note: observation is already latent vector
     def predict_action_with_prob(self, observation, deterministic = False):
@@ -568,7 +570,7 @@ latent_dim = 32
 batch_size = 1 # must be 1, use multiple environments for parallel episodes
 training_batch_size = 128
 num_train_envs = 128
-num_timesteps = 100
+num_timesteps = 115
 gradient_update_freq = 128
 train_data = train_dataloader(batch_size=batch_size, num_workers=0)
 obj_classifier = YOLO("yolo11n-cls.pt").to(device).eval()
@@ -582,10 +584,15 @@ train_envs = make_vec_env(train_data, obj_classifier, num_train_envs, latent_dim
 num_test_envs = 10
 test_data = test_dataloader(batch_size=batch_size, num_workers=0)
 eval_envs = make_vec_env(test_data, obj_classifier, num_test_envs, latent_dim)
-test_freq = 5 # every x timesteps in training
+test_freq = 1 # every x timesteps in training
 time_save = time.time()
 lpips_model = lpips.LPIPS(net='alex', spatial=True, verbose=False).to(device)
 
+laplacian_kernel = torch.tensor([[0, 1, 0],
+                                 [1, -4, 1],
+                                 [0, 1, 0]], dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
+
+laplacian_kernel = laplacian_kernel.repeat(3, 1, 1, 1)  # [3,1,3,3]
 
 encoder = Encoder(latent_dim=latent_dim, device=device)
 
@@ -628,6 +635,30 @@ def apply_action_grad(obs_tensor, actions):
 
     return orig_results, perturbed_results, orig_denormalized, perturbed_denormalized
 
+def differentiable_topk_mask(tensor, k_percent=0.01, temperature=0.01):
+    """
+    Approximate top-k% using a sharp softmax to get a soft mask.
+    Args:
+        tensor: [B, C, H, W] input magnitude
+        k_percent: fraction of values to keep high (e.g., 0.01 = top 1%)
+        temperature: lower = sharper selection (default: 0.01)
+    Returns:
+        soft_mask: [B, C, H, W] values in [0, 1], sum approx equal to k%
+    """
+    B, C, H, W = tensor.shape
+    flat = tensor.view(B, -1)  # [B, N]
+    
+    # Apply softmax with temperature to get a soft top-k-like distribution
+    weights = torch.softmax(flat / temperature, dim=1)  # [B, N]
+
+    # Scale to preserve sparsity level (optional)
+    N = flat.shape[1]
+    target_mass = k_percent * N
+    soft_mask = weights * (target_mass * N)  # Optional: match scale
+    soft_mask = torch.clamp(soft_mask, 0, 1)
+
+    return soft_mask.view(B, C, H, W)
+
 # x in [0,1]
 def brightness(x):
     return 0.299 * x[:, 0:1] + 0.587 * x[:, 1:2] + 0.114 * x[:, 2:3]
@@ -649,7 +680,7 @@ def rollout(
         obs_tensor = torch.from_numpy(obs_batch).to(policy.device) 
 
         with torch.no_grad():
-            _, actions = policy.pred_upsampled_action(obs_tensor, deterministic=True)
+            _, actions, _ = policy.pred_upsampled_action(obs_tensor, deterministic=True)
         
         actions_npy = actions.cpu().numpy()
 
@@ -692,25 +723,28 @@ def train_model(
     critic_losses = []
     alpha_losses = []
     classification_losses = []
-    # upsampled_l1_norms = []
+    upsampled_l1_norms = []
     # upsampled_l2_norms = []
     # delta_l2_norms = []
     # smoothness_vals = []
     perceptual_losses = []
     # latent_diversity_losses = []
     # upsampled_diversity_losses = []
-    # brightness_losses = []
-    gate_binary_losses = []
+    brightness_losses = []
+    # gate_binary_losses = []
     gate_sparsity_losses = []
     large_perturb_losses = []
     small_penalty_losses = []
+    gate_area_losses = []
+    orthogonality_losses = []
+    high_freq_losses = []
 
     for i in trange(total_timesteps):
         obs_batch = np.stack([env.batch for env in train_envs.envs]).squeeze(1)  # (num_envs, C, H, W)
         obs_tensor = torch.from_numpy(obs_batch).to(policy.device) 
 
         with torch.no_grad():
-            latent_deltas, actions = policy.pred_upsampled_action(obs_tensor, deterministic=False)
+            latent_deltas, actions, _ = policy.pred_upsampled_action(obs_tensor, deterministic=False)
         
         latent_deltas = latent_deltas.cpu().numpy()
         actions_npy = actions.cpu().numpy()
@@ -772,18 +806,20 @@ def train_model(
                 # l2_norm_loss = torch.norm(new_actions_upsampled, p=2, dim=(1, 2, 3)).mean()
                 # smoothness_loss = torch.abs(torch.diff(new_actions_upsampled, dim=2)).mean() + \
                 #                   torch.abs(torch.diff(new_actions_upsampled, dim=1)).mean() 
-                # l1_norm_loss = torch.norm(new_actions_upsampled, p=1, dim=(1, 2, 3)).mean()
+                l1_norm_loss = torch.norm(new_actions_upsampled, p=1, dim=(1, 2, 3)).mean()
                 # l2_norm_loss_deltas = torch.norm(new_action_deltas, p=2, dim=1).mean()
 
                 # Harder selection
-                gate_binary_loss = torch.mean(gate_mask * (1 - gate_mask))
-                gate_sparsity_loss = torch.mean(gate_mask) # few active pixels
+                # gate_binary_loss = torch.mean(gate_mask * (1 - gate_mask)) # not needed with differentiable top-k
+                gate_sparsity_loss = torch.mean(gate_mask) # L1
 
                 change_magnitude = torch.abs(new_actions_upsampled)  # [B, 3, H, W]
-                above_thresh = (change_magnitude > 0.4).float()
+                # soft_topk_mask = differentiable_topk_mask(change_magnitude, k_percent=0.01, temperature=0.01)
 
-                large_perturb_loss = -torch.mean(above_thresh)  # encourage more pixels > 0.4
-                small_penalty_loss = torch.mean(change_magnitude * (1 - above_thresh))
+                # above_thresh = (change_magnitude > 0.3).float()
+
+                large_perturb_loss = -torch.mean(change_magnitude * gate_mask)  # encourage top k pixels
+                small_penalty_loss = torch.mean(change_magnitude * (1 - gate_mask)) # discourage non top k pixels
 
                 orig_gated_rescaled = 2 * (orig_denormalized * gate_mask) - 1
                 perturbed_gated_rescaled = 2 * (perturbed_denormalized * gate_mask) - 1
@@ -805,6 +841,17 @@ def train_model(
 
                 brightness_loss = F.mse_loss(brightness(orig_denormalized), brightness(perturbed_denormalized))
 
+                target_area = 0.01 * 224 * 224
+                area = gate_mask.sum(dim=(1, 2, 3))  # per-sample
+                gate_area_loss = ((area - target_area) ** 2).mean()
+
+                input_flat = orig_denormalized.view(batch_size, -1)
+                perturb_flat = perturbed_denormalized.view(batch_size, -1)
+
+                orthogonality_loss = F.cosine_similarity(perturb_flat, input_flat, dim=1).mean()
+
+                high_freq = F.conv2d(perturbed_denormalized, laplacian_kernel, padding=1, groups=3)
+                high_freq_loss = -high_freq.abs().mean()
 
                 # L2, smoothness, L1, classification weights
                 # 1e-2, 1e-3, 1e-2 for Learned_main_1745897869.9799478.zip
@@ -818,38 +865,57 @@ def train_model(
                 # 1e-2, 1e-4, 3e-2, 500 for Learned_main_1746248347.6195297.zip: semi visible noise for each step, not much worse classifications
                 # 1e-2, 1e-4, 4e-2, 1000 for Learned_main_1746288507.925695.zip: semi visible noise for each step, decent classifications
                 # 1e-2, 1e-0, 1e-5, 100 for Learned_main_1747093838.8063166.zip: looks like shader, decent classifications, good numerical results, loss increases (good b/c learning something)
-                # 1e-2, 1e-0, 2e-5, 200 for Learned_main_1747093838.8063166.zip: looks like shader, decent classifications, good numerical results, loss increases (good b/c learning something)
+                # 1e-2, 1e-0, 2e-5, 200 for Learned_main_1747102585.3809047.zip: looks like shader, decent classifications, good numerical results, loss increases (good b/c learning something)
                 # Last 2 both give ~ same results with eval (~37k L1, ~97 L2)
                 # Still overfitting on reconstruction loss b/c learning simple shading
+
+
+                # Learned_main_1747159734.155619.zip
+                # Learned_main_1747171764.2120852.zip
+                # Learned_main_1747179504.425404.zip
+                # Learned_main_1747224190.7167678.zip: 5e1 class, 1e-1 l2 upsampled, 2e-3 l1_norm_upsampled, 2e0 * l2_latent, 5e0 perceptual, 2e1 latent_diversity, 5e2 decoder_diversity, 1e4 brightness
+
+                # Learned_main_1747232618.8114283.zip: 5e0 class, 5e0 perceptual, 1e0 gate binary, 1e0 gate sparsity, 1e0 large peturb, 1e0 small penalty
+                # Learned_main_1747240757.9703887.zip: 5e0 class, 5e0 perceptual, 1e1 gate binary, 2e1 gate sparsity, 5e1 large peturb, 1e1 small penalty
+                # Learned_main_1747255898.576219.zip: 5e0 class, 5e0 perceptual, 1e1 gate binary, 2e1 gate sparsity, 5e1 large peturb, 1e1 small penalty, 1e3 brightness
+                # Learned_main_1747521000.1190495.zip: 2e-3 l1 action, 1e2 class, 5e1 perceptual, 1e2 gate sparsity (L1), 2e1 large peturb, 1e2 small penalty, 1e4 brightness, saliency w/o normalization
+                # Learned_main_1747521000.1190495.zip: 1e-3 l1 action, 1e2 class, 5e1 perceptual, 1e3 gate sparsity (L1), 2e1 large peturb, 1e2 small penalty, 1e4 brightness, 1e-1 gate area saliency w normalization
+                # 67315.75259115885 L1, 173.98226381467654 L2, 31.434739941118742 steps
                 # TODO consider using variance regularization to bound sampled action/perceptual loss (mse on latent embeddings)
                 actor_loss = (policy.alpha.detach() * log_probs - torch.min(q_new_action_a, q_new_action_b)).mean() + \
-                             5e1 * classification_loss + \
-                             5e0 * perceptual_loss + \
-                             1e1 * gate_binary_loss + \
-                             2e1 * gate_sparsity_loss + \
-                             5e1 * large_perturb_loss + \
-                             1e1 * small_penalty_loss + \
-                             1e3 * brightness_loss
+                             4e2 * classification_loss + \
+                             5e1 * perceptual_loss + \
+                             1e3 * gate_sparsity_loss + \
+                             2e1 * large_perturb_loss + \
+                             1e2 * small_penalty_loss + \
+                             1e5 * brightness_loss + \
+                             1e-3 * l1_norm_loss + \
+                             2e-4 * gate_area_loss + \
+                             1e2 * orthogonality_loss + \
+                             1e1 * high_freq_loss
+                            #  1e1 * gate_binary_loss + \
                             #  1e-1 * l2_norm_loss + \
                             #  0e0 * smoothness_loss + \
-                            #  2e-3 * l1_norm_loss + \
                             #  2e0 * l2_norm_loss_deltas + \
                             #  2e1 * latent_diversity_loss + \
                             #  5e2 * decoder_diversity_loss + \
                 actor_losses.append(actor_loss.item())
                 classification_losses.append(classification_loss.item())
                 # upsampled_l2_norms.append(l2_norm_loss.item())
-                # upsampled_l1_norms.append(l1_norm_loss.item())
+                upsampled_l1_norms.append(l1_norm_loss.item())
                 # smoothness_vals.append(smoothness_loss.item())
                 # delta_l2_norms.append(l2_norm_loss_deltas.item())
                 perceptual_losses.append(perceptual_loss.item())
                 # latent_diversity_losses.append(latent_diversity_loss.item())
                 # upsampled_diversity_losses.append(decoder_diversity_loss.item())
-                # brightness_losses.append(brightness_loss.item())
-                gate_binary_losses.append(gate_binary_loss.item())
+                brightness_losses.append(brightness_loss.item())
+                # gate_binary_losses.append(gate_binary_loss.item())
                 gate_sparsity_losses.append(gate_sparsity_loss.item())
                 large_perturb_losses.append(large_perturb_loss.item())
                 small_penalty_losses.append(small_penalty_loss.item())
+                gate_area_losses.append(gate_area_loss.item())
+                orthogonality_losses.append(orthogonality_loss.item())
+                high_freq_losses.append(high_freq_loss.item())
 
                 # if i == 9: 
                 #     display_comp_graph(classification_loss, "perturbed_probs_comp_graph")
@@ -883,7 +949,7 @@ def train_model(
                 # Soft update target
                 polyak_update(policy.critic.parameters(), policy.critic_target.parameters(), tau)
 
-        if i % test_freq == 0: 
+        if i % test_freq == 0 and replay_buffer.length() >= 10_000: 
             rollout_val = rollout(test_envs, policy, gamma)
             if rollout_val > max_rollout_found: 
                 model.save(f"Learned_main_intermed_{time_save}.zip")
@@ -895,7 +961,7 @@ def train_model(
         plot_per_step(actor_losses, 1, f"Learned_main_{time_save}_actor.png", "Actor Loss")
         plot_per_step(critic_losses, 1, f"Learned_main_{time_save}_critic.png", "Critic Loss")
         plot_per_step(alpha_losses, 1, f"Learned_main_{time_save}_alpha.png", "Alpha Loss")
-        # plot_per_step(upsampled_l1_norms, 1, f"Learned_main_{time_save}_l1.png", "Upsampled L1 Loss")
+        plot_per_step(upsampled_l1_norms, 1, f"Learned_main_{time_save}_l1.png", "Upsampled L1 Loss")
         # plot_per_step(upsampled_l2_norms, 1, f"Learned_main_{time_save}_l2.png", "Upsampled L2 Loss")
         # plot_per_step(smoothness_vals, 1, f"Learned_main_{time_save}_smoothness.png", "Smoothness Loss")
         plot_per_step(classification_losses, 1, f"Learned_main_{time_save}_cls.png", "Classification Loss")
@@ -903,11 +969,14 @@ def train_model(
         # plot_per_step(perceptual_losses, 1, f"Learned_main_{time_save}_perceptual.png", "LPIPS Perceptual Loss")
         # plot_per_step(latent_diversity_losses, 1, f"Learned_main_{time_save}_latent_diversity.png", "Latent Diversity Loss")
         # plot_per_step(upsampled_diversity_losses, 1, f"Learned_main_{time_save}_upsampled_diversity.png", "Decoder Diversity Loss")
-        # plot_per_step(brightness_losses, 1, f"Learned_main_{time_save}_brightness.png", "Brightness Loss")
-        plot_per_step(gate_binary_losses, 1, f"Learned_main_{time_save}_gate_binary.png", "Gate Binary Loss")
+        plot_per_step(brightness_losses, 1, f"Learned_main_{time_save}_brightness.png", "Brightness Loss")
+        # plot_per_step(gate_binary_losses, 1, f"Learned_main_{time_save}_gate_binary.png", "Gate Binary Loss")
         plot_per_step(gate_sparsity_losses, 1, f"Learned_main_{time_save}_gate_sparsity.png", "Gate Sparsity Loss")
         plot_per_step(large_perturb_losses, 1, f"Learned_main_{time_save}_large_perturbs.png", "Large Perturbation Loss")
         plot_per_step(small_penalty_losses, 1, f"Learned_main_{time_save}_small_penalty.png", "Small Penalty Loss")
+        plot_per_step(gate_area_losses, 1, f"Learned_main_{time_save}_gate_area.png", "Gate Area Loss")
+        plot_per_step(orthogonality_losses, 1, f"Learned_main_{time_save}_orthog.png", "Orthogonality Loss")
+        plot_per_step(high_freq_losses, 1, f"Learned_main_{time_save}_high_freq.png", "High Frequency Loss")
 
 
 train_model(model.env, eval_envs, model.policy, model.replay_buffer, total_timesteps=num_timesteps, batch_size=training_batch_size, gradient_update_freq=gradient_update_freq, gamma=gamma, test_freq=test_freq)

@@ -15,12 +15,12 @@ class DataloaderEnv(gym.Env):
         self.perturbed_yolo = None
         self.next_batch = None
         self.done = None
+        self.info = {"curr_class": None, "next_class": None}
         self.batch_size = batch_size 
         self.max_steps_per_episode = max_steps_per_episode
         self.step_idx = 0 # num steps in current episode
         self.obj_detector = obj_detector
         self.device = device
-        self.info = []
         self.index = idx
         self.latent_dim = latent_dim
 
@@ -47,6 +47,10 @@ class DataloaderEnv(gym.Env):
 
         reward_batches, done_batches = calc_rewards(orig_states, self.next_batch, self.orig_yolo, self.perturbed_yolo, self.step_idx, done=self.done, device=self.device)
 
+        self.info["curr_class"] = self.orig_yolo.names[self.orig_yolo.probs.top1]
+        self.info["next_class"] = self.perturbed_yolo.names[self.perturbed_yolo.probs.top1]
+        # print(self.info["curr_class"], self.info["next_class"], done_batches)
+
         self.step_idx += 1
         self.batch = self.next_batch
 
@@ -55,7 +59,7 @@ class DataloaderEnv(gym.Env):
         self.next_batch = None
         self.done = None
 
-        return self.batch, reward_batches, done_batches, {}, {}
+        return self.batch, reward_batches, done_batches, {}, self.info
 
     def set_results(self, next_batch, orig_yolo, perturbed_yolo, done=None):
         self.next_batch = next_batch.unsqueeze(0)

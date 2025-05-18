@@ -103,17 +103,17 @@ def rollout(
             else: 
                 env.set_results(perturbed_normalized_clamp_cpu[i], orig_results[i], perturbed_results[i], dones[i])
 
-        next_obs, rewards, dones, _ = envs.step(actions_npy)
+        _, _, dones, info = envs.step(actions_npy)
         # total_rewards += curr_gamma * rewards
         # curr_gamma *= gamma
 
         actions_denorm = denormalize_batch(actions)
-        l1_orig = torch.norm(obs_tensor, p=1, dim=(1, 2, 3)).mean().item()
+        l1_orig = torch.norm(orig_denormalized, p=1, dim=(1, 2, 3)).mean().item()
         l1_action = torch.norm(actions_denorm, p=1, dim=(1, 2, 3)).mean().item()
-        l1_perturbed = torch.norm(perturbed_normalized_clamp, p=1, dim=(1, 2, 3)).mean().item()
-        l2_orig = torch.norm(obs_tensor, p=2, dim=(1, 2, 3)).mean().item()
+        l1_perturbed = torch.norm(perturbed_denormalized, p=1, dim=(1, 2, 3)).mean().item()
+        l2_orig = torch.norm(orig_denormalized, p=2, dim=(1, 2, 3)).mean().item()
         l2_action = torch.norm(actions_denorm, p=2, dim=(1, 2, 3)).mean().item()
-        l2_perturbed = torch.norm(perturbed_normalized_clamp, p=2, dim=(1, 2, 3)).mean().item()
+        l2_perturbed = torch.norm(perturbed_denormalized, p=2, dim=(1, 2, 3)).mean().item()
         
         l1_norms_orig.append(l1_orig)
         l2_norms_orig.append(l2_orig)
@@ -121,6 +121,8 @@ def rollout(
         l2_norms_actions.append(l2_action)
         l1_norms_perturbed.append(l1_perturbed)
         l2_norms_perturbed.append(l2_perturbed)
+
+        # display_before_after(obs_tensor, perturbed_normalized_clamp, actions, info)
 
         # display_batch(obs_tensor)
         # display_batch(perturbed_normalized_clamp)
@@ -131,7 +133,7 @@ def rollout(
             if done.item():
                 num_eps_completed += 1
                 val_envs.env_method("reset", indices=idx)
-
+                dones[idx] = False
 
         if step_num > max_steps: 
             break
