@@ -1,6 +1,5 @@
 import torch
-import torch.nn as nn
-import torchvision.models as models
+from stable_baselines3 import SAC
 import sys
 import os
 from ultralytics import YOLO
@@ -11,29 +10,10 @@ from collections import defaultdict, Counter
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from dataloader import train_dataloader, test_dataloader, val_dataloader, denormalize_batch, renormalize_batch, display_batch
 from environment import DataloaderEnv
+from old_models import Encoder, ZarrSAC, CustomSACPolicy
 
 from utils import *
 
-
-class Encoder(nn.Module): 
-    def __init__(self, pretrained=True, latent_dim=128, device="cuda"): 
-        super().__init__()
-        
-        model_base = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
-        # Yields 512 dim vector 
-        self.encoder = nn.Sequential(*list(model_base.children())[:-1]).to(device) # remove head
-
-        for param in self.encoder.parameters(): 
-            param.requires_grad = False
-
-        for module in self.encoder.modules():
-            if isinstance(module, torch.nn.BatchNorm2d):
-                module.train()
-
-    def forward(self, x): 
-        x = self.encoder(x).squeeze(-1).squeeze(-1)
-
-        return x
 
 
 def make_env_fn(dataset, obj_classifier, idx, latent_dim):
@@ -51,15 +31,30 @@ latent_dim = 32
 batch_size = 1 # must be 1, use multiple environments for parallel episodes
 num_val_envs = 32
 num_timesteps = 1000
-val_data = val_dataloader(batch_size=batch_size, num_workers=0)
+val_data = train_dataloader(batch_size=batch_size, num_workers=0)
 obj_classifier = YOLO("yolo11n-cls.pt").to(device).eval()
 val_envs = make_vec_env(val_data, obj_classifier, num_val_envs, latent_dim)
 
 encoder = Encoder(latent_dim=latent_dim, device=device)
 
+model = ZarrSAC(
+    policy=CustomSACPolicy,
+    env=val_envs,
+    buffer_size=10_000, 
+    policy_kwargs=dict(
+        encoder=encoder,
+        latent_dim=latent_dim,
+        batch_size=batch_size * num_val_envs,
+        device=device
+    ),
+    verbose=1,
+)
+
+model.load(f"Learned_main_1747240757.9703887.zip")
 
 def rollout(
     envs: DummyVecEnv, 
+    policy: CustomSACPolicy,
     gamma: float,
     max_steps: int = 50, 
 ): 
@@ -74,17 +69,18 @@ def rollout(
     l2_norms_perturbed = []
     num_eps_completed = 0
 
+    closest_classes = defaultdict(Counter)
+
     # total_rewards = np.zeros((envs.num_envs))
     step_num = 0
     # curr_gamma = 1
 
-    closest_classes = defaultdict(Counter)
-
     while True:
         obs_batch = np.stack([env.batch for env in envs.envs]).squeeze(1)  # (num_envs, C, H, W)
-        obs_tensor = torch.from_numpy(obs_batch).to(device) 
+        obs_tensor = torch.from_numpy(obs_batch).to(policy.device) 
 
-        actions = torch.clamp(torch.randn(obs_tensor.shape, device='cuda'), -1, 1)
+        with torch.no_grad():
+            _, actions = policy.pred_upsampled_action(obs_tensor, deterministic=True)
 
         actions_npy = actions.cpu().numpy()
 
@@ -94,7 +90,7 @@ def rollout(
         perturbed_denormalized = denormalize_batch(perturbed_normalized_to_s) # [0,1] range
 
         perturbed_normalized_clamp = renormalize_batch(perturbed_denormalized)
-        perturbed_normalized_clamp_cpu = renormalize_batch(perturbed_denormalized).cpu()
+        perturbed_normalized_clamp_cpu = perturbed_normalized_clamp.cpu()
     
         with torch.no_grad():
             orig_results = obj_classifier(orig_denormalized, verbose=False)
@@ -106,10 +102,12 @@ def rollout(
             else: 
                 env.set_results(perturbed_normalized_clamp_cpu[i], orig_results[i], perturbed_results[i], dones[i])
 
-        _, _, dones, info = envs.step(actions_npy)
-        # total_rewards += curr_gamma * rewards
-        # curr_gamma *= gamma
+        # Info is a list of dicts
+        _, _, dones, info = envs.step(actions_npy) 
 
+        # print("\n")
+
+        # TODO figure out why this gives comparable values to standard normal dist, even though visually it looks different
         actions_denorm = denormalize_batch(actions)
         l1_orig = torch.norm(orig_denormalized, p=1, dim=(1, 2, 3)).mean().item()
         l1_action = torch.norm(actions_denorm, p=1, dim=(1, 2, 3)).mean().item()
@@ -144,7 +142,7 @@ def rollout(
         
     return np.array(l1_norms_orig), np.array(l2_norms_orig), np.array(l1_norms_actions), np.array(l2_norms_actions), np.array(l1_norms_perturbed), np.array(l2_norms_perturbed), (step_num * envs.num_envs / num_eps_completed), closest_classes
 
-l1_orig, l2_orig, l1_action, l2_action, l1_full, l2_full, cls_num_steps, closest_classes = rollout(val_envs, gamma=gamma, max_steps=num_timesteps)
+l1_orig, l2_orig, l1_action, l2_action, l1_full, l2_full, cls_num_steps, closest_classes = rollout(val_envs, model.policy, gamma=gamma, max_steps=num_timesteps)
 
 # These norms are for [0,1] images
 print(f"""Avg L1 norm of original: {np.mean(l1_orig)}\tAvg L2 norm of original: {np.mean(l2_orig)}
@@ -152,13 +150,7 @@ print(f"""Avg L1 norm of original: {np.mean(l1_orig)}\tAvg L2 norm of original: 
       \tAvg L1 norm of perturbed img: {np.mean(l1_full)}\tAvg L2 norm of perturbed img: {np.mean(l2_full)}
       \tAvg num steps per episode: {cls_num_steps}""")
 
-# Result for gaussian noise: 
-# Avg L1 norm: 68348.60227272728  Avg L2 norm: 186.12226680180171 Avg num steps per episode: 1.0001248907206195
-# These norms are for [0,1] images
-# These norms are for [0,1] images
 for curr_class, transitions in closest_classes.items():
     if transitions:
         next_class, count = transitions.most_common(1)[0]
         print(f"{curr_class} goes to {next_class} with freq {count}")
-        
-        

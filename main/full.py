@@ -879,7 +879,7 @@ def train_model(
                 # Learned_main_1747240757.9703887.zip: 5e0 class, 5e0 perceptual, 1e1 gate binary, 2e1 gate sparsity, 5e1 large peturb, 1e1 small penalty
                 # Learned_main_1747255898.576219.zip: 5e0 class, 5e0 perceptual, 1e1 gate binary, 2e1 gate sparsity, 5e1 large peturb, 1e1 small penalty, 1e3 brightness
                 # Learned_main_1747521000.1190495.zip: 2e-3 l1 action, 1e2 class, 5e1 perceptual, 1e2 gate sparsity (L1), 2e1 large peturb, 1e2 small penalty, 1e4 brightness, saliency w/o normalization
-                # Learned_main_1747521000.1190495.zip: 1e-3 l1 action, 1e2 class, 5e1 perceptual, 1e3 gate sparsity (L1), 2e1 large peturb, 1e2 small penalty, 1e4 brightness, 1e-1 gate area saliency w normalization
+                # Learned_main_1747535493.1333928.zip: 1e-3 l1 action, 1e2 class, 5e1 perceptual, 1e3 gate sparsity (L1), 2e1 large peturb, 1e2 small penalty, 1e4 brightness, 1e-1 gate area saliency w normalization
                 # 67315.75259115885 L1, 173.98226381467654 L2, 31.434739941118742 steps
                 # TODO consider using variance regularization to bound sampled action/perceptual loss (mse on latent embeddings)
                 actor_loss = (policy.alpha.detach() * log_probs - torch.min(q_new_action_a, q_new_action_b)).mean() + \

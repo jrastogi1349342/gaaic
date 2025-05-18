@@ -56,7 +56,7 @@ def display_before_after(clean, perturbed, noise, info, gate_mask=None, num_imgs
     std_cuda = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).to("cuda")
 
     # Denormalize images
-    noise = (perturbed - clean) * std_cuda + mean_cuda
+    noise = noise * std_cuda + mean_cuda
     noise = noise.permute(0, 2, 3, 1).cpu().numpy()  # (B, H, W, C)
     noise = np.clip(noise, 0, 1)
 
