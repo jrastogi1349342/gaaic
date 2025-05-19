@@ -16,3 +16,6 @@
     * Baseline: `python3 baseline/cls_full.py`
     * Main: `python3 main/eval.py`
         * Note: make sure the last two lines in `main/full.py` are commented first. 
+
+### Note
+The stretch goal is not very developed. 
