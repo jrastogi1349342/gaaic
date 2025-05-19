@@ -150,7 +150,10 @@ print(f"""Avg L1 norm of original: {np.mean(l1_orig)}\tAvg L2 norm of original: 
       \tAvg L1 norm of perturbed img: {np.mean(l1_full)}\tAvg L2 norm of perturbed img: {np.mean(l2_full)}
       \tAvg num steps per episode: {cls_num_steps}""")
 
-for curr_class, transitions in closest_classes.items():
-    if transitions:
-        next_class, count = transitions.most_common(1)[0]
-        print(f"{curr_class} goes to {next_class} with freq {count}")
+# for curr_class, transitions in closest_classes.items():
+#     if transitions:
+#         next_class, count = transitions.most_common(1)[0]
+#         print(f"{curr_class} goes to {next_class} with freq {count}")
+
+
+heatmap(closest_classes, file_name="main/learned_before_after_labels.png")

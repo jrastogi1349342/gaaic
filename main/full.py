@@ -979,5 +979,5 @@ def train_model(
         plot_per_step(high_freq_losses, 1, f"Learned_main_{time_save}_high_freq.png", "High Frequency Loss")
 
 
-train_model(model.env, eval_envs, model.policy, model.replay_buffer, total_timesteps=num_timesteps, batch_size=training_batch_size, gradient_update_freq=gradient_update_freq, gamma=gamma, test_freq=test_freq)
-model.save(f"Learned_main_{time_save}.zip")
+# train_model(model.env, eval_envs, model.policy, model.replay_buffer, total_timesteps=num_timesteps, batch_size=training_batch_size, gradient_update_freq=gradient_update_freq, gamma=gamma, test_freq=test_freq)
+# model.save(f"Learned_main_{time_save}.zip")

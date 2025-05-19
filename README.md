@@ -1,4 +1,4 @@
-# Targeted Adversarial Perturbations for Object Detectors (TAPOD)
+# Generative Adversarial Attacks on Image Classification
 
 
 
@@ -9,13 +9,10 @@
 
 ### Training
 1. Run the desired script, corresponding to the desired level of complexity: 
-    1. Baseline: `python3 baseline/full.py`
-    2. Main: `python3 main/full.py`
-    3. Stretch: `python3 stretch/full.py`
+    * Main: `python3 main/full.py`
 
 ### Inference: 
-1. Run the desired script, corresponding to the desired level of complexity: 
-    1. Baseline: `python3 baseline/eval.py`
-    2. Main: `python3 main/eval.py`
-    3. Stretch: `python3 stretch/eval.py`
-        * Note: make sure the command that launches training in `stretch/full.py` is commented first. 
+1. Run the desired script, corresponding to the desired level of complexity. 
+    * Baseline: `python3 baseline/cls_full.py`
+    * Main: `python3 main/eval.py`
+        * Note: make sure the last two lines in `main/full.py` are commented first. 

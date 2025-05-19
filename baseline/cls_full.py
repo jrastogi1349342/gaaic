@@ -156,9 +156,9 @@ print(f"""Avg L1 norm of original: {np.mean(l1_orig)}\tAvg L2 norm of original: 
 # Avg L1 norm: 68348.60227272728  Avg L2 norm: 186.12226680180171 Avg num steps per episode: 1.0001248907206195
 # These norms are for [0,1] images
 # These norms are for [0,1] images
-for curr_class, transitions in closest_classes.items():
-    if transitions:
-        next_class, count = transitions.most_common(1)[0]
-        print(f"{curr_class} goes to {next_class} with freq {count}")
+# for curr_class, transitions in closest_classes.items():
+#     if transitions:
+#         next_class, count = transitions.most_common(1)[0]
+#         print(f"{curr_class} goes to {next_class} with freq {count}")
         
-        
+heatmap(closest_classes, file_name="baseline/rand_before_after_labels.png")

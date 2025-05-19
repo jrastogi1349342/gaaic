@@ -2,6 +2,9 @@ import torch
 import numpy as np
 from torchviz import make_dot
 import matplotlib.pyplot as plt
+from collections import defaultdict, Counter
+import pandas as pd
+import seaborn as sns
 
 def get_mem_used(): 
     free, total = torch.cuda.mem_get_info("cuda")
@@ -68,7 +71,7 @@ def display_before_after(clean, perturbed, noise, info, gate_mask=None, num_imgs
     perturbed = perturbed.permute(0, 2, 3, 1).cpu().numpy()  # (B, H, W, C)
     perturbed = np.clip(perturbed, 0, 1)
 
-    if gate_mask != None: 
+    if gate_mask.all() != None: 
         gate_mask = gate_mask.permute(0, 2, 3, 1).cpu().numpy()  # (B, H, W, C)
         gate_mask = np.clip(gate_mask, 0, 1)
 
@@ -90,7 +93,7 @@ def display_before_after(clean, perturbed, noise, info, gate_mask=None, num_imgs
             axes[i + 2 * num_imgs].axis("off") 
             axes[i + 2 * num_imgs].set_title(f"Noise")
 
-            if gate_mask != None: 
+            if gate_mask.all() != None: 
                 axes[i + 3 * num_imgs].imshow(gate_mask[i], cmap="hot")
                 axes[i + 3 * num_imgs].axis("off") 
                 axes[i + 3 * num_imgs].set_title(f"Saliency Map")
@@ -100,8 +103,72 @@ def display_before_after(clean, perturbed, noise, info, gate_mask=None, num_imgs
             axes[i + num_imgs].set_visible(False)  # Hide empty subplots
             axes[i + 2 * num_imgs].set_visible(False)  # Hide empty subplots
 
-            if gate_mask != None: 
+            if gate_mask.all() != None: 
                 axes[i + 3 * num_imgs].set_visible(False)  # Hide empty subplots
 
     plt.tight_layout()
+    plt.show()
+
+def display_before_after_gate(clean, perturbed, info, gate_mask, num_imgs=4):
+    batch_size, _, _, _ = clean.shape
+    num_rows = 3
+
+    mean_cuda = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).to("cuda")
+    std_cuda = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).to("cuda")
+
+    clean = clean * std_cuda + mean_cuda
+    clean = clean.permute(0, 2, 3, 1).cpu().numpy()  # (B, H, W, C)
+    clean = np.clip(clean, 0, 1)
+
+    perturbed = perturbed * std_cuda + mean_cuda
+    perturbed = perturbed.permute(0, 2, 3, 1).cpu().numpy()  # (B, H, W, C)
+    perturbed = np.clip(perturbed, 0, 1)
+
+    gate_mask = gate_mask.permute(0, 2, 3, 1).cpu().numpy()  # (B, H, W, C)
+    gate_mask = np.clip(gate_mask, 0, 1)
+
+    # Create figure
+    fig, axes = plt.subplots(num_rows, num_imgs, figsize=(12, 6))
+    axes = axes.flatten()
+
+    for i in range(num_imgs):
+        if i < batch_size:
+            axes[i].imshow(clean[i])
+            axes[i].axis("off")  # Hide axes
+            axes[i].set_title(f"Clean: {info[i]['curr_class']}")
+
+            axes[i + num_imgs].imshow(perturbed[i])
+            axes[i + num_imgs].axis("off")
+            axes[i + num_imgs].set_title(f"Perturbed: {info[i]['next_class']}")
+
+            axes[i + 2 * num_imgs].imshow(gate_mask[i], cmap="hot")
+            axes[i + 2 * num_imgs].axis("off") 
+            axes[i + 2 * num_imgs].set_title(f"Saliency Map")
+
+        else:
+            axes[i].set_visible(False)  # Hide empty subplots
+            axes[i + num_imgs].set_visible(False)  # Hide empty subplots
+            axes[i + 2 * num_imgs].set_visible(False)  # Hide empty subplots
+
+    plt.tight_layout()
+    plt.show()
+
+def heatmap(closest_classes, file_name): 
+    df = pd.DataFrame.from_dict(closest_classes, orient='index').fillna(0).astype(int)  # rows = curr_class, cols = next_class
+
+    # Step 2: Optionally reduce to top-k most active classes
+    k = 8  # number of classes to visualize
+    top_classes = df.sum(axis=1).nlargest(k).index
+    df_subset = df.reindex(index=top_classes, columns=top_classes, fill_value=0)
+
+    # df_norm = df_subset.div(df_subset.sum(axis=1), axis=0)
+
+    # Step 3: Plot heatmap
+    plt.figure(figsize=(12, 10))
+    sns.heatmap(df_subset, cmap="viridis", annot=False, square=True, cbar_kws={'label': 'Transition Count'})
+    plt.title(f"Class Transition Heatmap (Top {k} Classes)")
+    plt.xlabel("Next Class")
+    plt.ylabel("Current Class")
+    plt.tight_layout()
+    plt.savefig(file_name, dpi=300)
     plt.show()
