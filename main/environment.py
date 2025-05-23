@@ -5,7 +5,7 @@ from rewards import calc_rewards
 from dataloader import denormalize_batch, renormalize_batch
 
 class DataloaderEnv(gym.Env): 
-    def __init__(self, dataloader, obj_detector, idx, latent_dim, device="cuda", max_steps_per_episode=1000, batch_size=8, action_shape=(480, 480, 3)): 
+    def __init__(self, dataloader, idx, latent_dim, device="cuda", max_steps_per_episode=1000, batch_size=8, action_shape=(480, 480, 3)): 
         super().__init__
 
         self.dataloader = iter(dataloader)
@@ -19,7 +19,6 @@ class DataloaderEnv(gym.Env):
         self.batch_size = batch_size 
         self.max_steps_per_episode = max_steps_per_episode
         self.step_idx = 0 # num steps in current episode
-        self.obj_detector = obj_detector
         self.device = device
         self.index = idx
         self.latent_dim = latent_dim

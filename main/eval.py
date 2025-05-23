@@ -9,7 +9,7 @@ import numpy as np
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from dataloader import train_dataloader, test_dataloader, val_dataloader, denormalize_batch, renormalize_batch, display_batch
 from environment import DataloaderEnv
-from full import Encoder, ZarrSAC, CustomSACPolicy
+from models import Encoder, ZarrSAC, CustomSACPolicy
 
 from utils import *
 
