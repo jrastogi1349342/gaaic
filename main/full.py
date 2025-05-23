@@ -232,7 +232,7 @@ class CustomSACPolicy(SACPolicy):
 
         self.log_alpha = torch.nn.Parameter(torch.tensor(0.0, requires_grad=True))
 
-        self.actor.optimizer = torch.optim.Adam(self.actor.parameters(), lr=4e-5)
+        self.actor.optimizer = torch.optim.Adam(self.actor.parameters(), lr=4e-5, weight_decay=1e-3)
         self.critic.optimizer = torch.optim.Adam(self.critic.parameters(), lr=2e-5)
         self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=6e-5)
 
@@ -868,6 +868,10 @@ def train_model(
                 input_flat = orig_denormalized.view(batch_size, -1)
                 perturb_flat = perturbed_denormalized.view(batch_size, -1)
 
+                # TODO try entropy based regularization/consistency after augmentations (self-supervised)/discriminator
+                # epsilon = 1e-6  # small value for numerical stability
+                # entropy_loss = -torch.sum(gate_mask * torch.log(gate_mask + epsilon), dim=(2,3))
+
                 orthogonality_loss = F.cosine_similarity(perturb_flat, input_flat, dim=1).mean()
 
                 high_freq = F.conv2d(perturbed_denormalized, laplacian_kernel, padding=1, groups=3)
@@ -999,5 +1003,5 @@ def train_model(
         plot_per_step(high_freq_losses, 1, f"main_results//{time_save}//high_freq.png", f"High Frequency Loss, Weight {high_freq_hp}")
 
 
-train_model(model.env, eval_envs, model.policy, model.replay_buffer, total_timesteps=num_timesteps, batch_size=training_batch_size, gradient_update_freq=gradient_update_freq, gamma=gamma, test_freq=test_freq)
-model.save(f"main_results//{time_save}//end.zip")
+# train_model(model.env, eval_envs, model.policy, model.replay_buffer, total_timesteps=num_timesteps, batch_size=training_batch_size, gradient_update_freq=gradient_update_freq, gamma=gamma, test_freq=test_freq)
+# model.save(f"main_results//{time_save}//end.zip")

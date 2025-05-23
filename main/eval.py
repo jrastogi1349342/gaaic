@@ -59,6 +59,8 @@ def rollout(
 ): 
     envs.reset()
 
+    closest_classes = defaultdict(Counter)
+
     # for [0,1] normalized images
     l1_norms_orig = [] 
     l2_norms_orig = []
@@ -130,6 +132,7 @@ def rollout(
 
         for idx, done in enumerate(dones):
             if done.item():
+                closest_classes[info[idx]["curr_class"]][info[idx]["next_class"]] += 1
                 num_eps_completed += 1
                 val_envs.env_method("reset", indices=idx)
                 dones[idx] = False
@@ -137,12 +140,14 @@ def rollout(
         if step_num > max_steps: 
             break
         
-    return np.array(l1_norms_orig), np.array(l2_norms_orig), np.array(l1_norms_actions), np.array(l2_norms_actions), np.array(l1_norms_perturbed), np.array(l2_norms_perturbed), (step_num * envs.num_envs / num_eps_completed)
+    return np.array(l1_norms_orig), np.array(l2_norms_orig), np.array(l1_norms_actions), np.array(l2_norms_actions), np.array(l1_norms_perturbed), np.array(l2_norms_perturbed), (step_num * envs.num_envs / num_eps_completed), closest_classes
 
-l1_orig, l2_orig, l1_action, l2_action, l1_full, l2_full, cls_num_steps = rollout(val_envs, model.policy, gamma=gamma, max_steps=num_timesteps)
+l1_orig, l2_orig, l1_action, l2_action, l1_full, l2_full, cls_num_steps, closest_classes = rollout(val_envs, model.policy, gamma=gamma, max_steps=num_timesteps)
 
 # These norms are for [0,1] images
 print(f"""Avg L1 norm of original: {np.mean(l1_orig)}\tAvg L2 norm of original: {np.mean(l2_orig)}
       \tAvg L1 norm of action: {np.mean(l1_action)}\tAvg L2 norm of action: {np.mean(l2_action)}
       \tAvg L1 norm of perturbed img: {np.mean(l1_full)}\tAvg L2 norm of perturbed img: {np.mean(l2_full)}
       \tAvg num steps per episode: {cls_num_steps}""")
+
+heatmap(closest_classes, file_name="main/learned_before_after_labels.png", k=80)

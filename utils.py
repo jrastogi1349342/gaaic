@@ -153,22 +153,21 @@ def display_before_after_gate(clean, perturbed, info, gate_mask, num_imgs=4):
     plt.tight_layout()
     plt.show()
 
-def heatmap(closest_classes, file_name): 
+def heatmap(closest_classes, file_name, k=30, save=False): 
     df = pd.DataFrame.from_dict(closest_classes, orient='index').fillna(0).astype(int)  # rows = curr_class, cols = next_class
 
-    # Step 2: Optionally reduce to top-k most active classes
-    k = 8  # number of classes to visualize
     top_classes = df.sum(axis=1).nlargest(k).index
     df_subset = df.reindex(index=top_classes, columns=top_classes, fill_value=0)
 
     # df_norm = df_subset.div(df_subset.sum(axis=1), axis=0)
 
     # Step 3: Plot heatmap
-    plt.figure(figsize=(12, 10))
+    plt.figure(figsize=(20, 18))
     sns.heatmap(df_subset, cmap="viridis", annot=False, square=True, cbar_kws={'label': 'Transition Count'})
     plt.title(f"Class Transition Heatmap (Top {k} Classes)")
     plt.xlabel("Next Class")
     plt.ylabel("Current Class")
     plt.tight_layout()
-    plt.savefig(file_name, dpi=300)
+    if save: 
+        plt.savefig(file_name, dpi=300)
     plt.show()
