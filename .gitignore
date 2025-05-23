@@ -20,3 +20,6 @@ Learned*.zip
 *.png
 current*
 q_new*
+
+# Result folders
+*results/

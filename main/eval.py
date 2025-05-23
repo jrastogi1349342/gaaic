@@ -49,7 +49,7 @@ model = ZarrSAC(
     verbose=1,
 )
 
-model.load(f"Learned_main_1747582611.509947.zip")
+model.load(f"main_results/1747947935.8395574/middle.zip")
 
 def rollout(
     envs: DummyVecEnv, 
@@ -105,13 +105,13 @@ def rollout(
         # print("\n")
 
         # TODO figure out why this gives comparable values to standard normal dist, even though visually it looks different
-        actions_denorm = denormalize_batch(actions)
-        l1_orig = torch.norm(orig_denormalized, p=1, dim=(1, 2, 3)).mean().item()
-        l1_action = torch.norm(actions_denorm, p=1, dim=(1, 2, 3)).mean().item()
-        l1_perturbed = torch.norm(perturbed_denormalized, p=1, dim=(1, 2, 3)).mean().item()
-        l2_orig = torch.norm(orig_denormalized, p=2, dim=(1, 2, 3)).mean().item()
-        l2_action = torch.norm(actions_denorm, p=2, dim=(1, 2, 3)).mean().item()
-        l2_perturbed = torch.norm(perturbed_denormalized, p=2, dim=(1, 2, 3)).mean().item()
+        # actions_denorm = denormalize_batch(actions)
+        l1_orig = torch.norm(obs_tensor, p=1, dim=(1, 2, 3)).mean().item()
+        l1_action = torch.norm(actions, p=1, dim=(1, 2, 3)).mean().item()
+        l1_perturbed = torch.norm(perturbed_normalized_to_s, p=1, dim=(1, 2, 3)).mean().item()
+        l2_orig = torch.norm(obs_tensor, p=2, dim=(1, 2, 3)).mean().item()
+        l2_action = torch.norm(actions, p=2, dim=(1, 2, 3)).mean().item()
+        l2_perturbed = torch.norm(perturbed_normalized_to_s, p=2, dim=(1, 2, 3)).mean().item()
         
         l1_norms_orig.append(l1_orig)
         l2_norms_orig.append(l2_orig)
@@ -121,7 +121,7 @@ def rollout(
         l2_norms_perturbed.append(l2_perturbed)
 
         # display_before_after(obs_tensor, perturbed_normalized_clamp, actions, info, gate_mask=gate_mask)
-        display_before_after_gate(obs_tensor, perturbed_normalized_clamp, info, gate_mask)
+        # display_before_after_gate(obs_tensor, perturbed_normalized_clamp, info, gate_mask)
 
         # display_batch(obs_tensor)
         # display_batch(perturbed_normalized_clamp)

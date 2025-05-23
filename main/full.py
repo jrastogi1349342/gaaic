@@ -33,9 +33,8 @@ from utils import *
 
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
-parser = argparse.ArgumentParser(description='PyTorch actor-critic example')
-parser.add_argument('--gamma', type=float, default=0.99, metavar='G',
-                    help='discount factor (default: 0.99)')
+parser = argparse.ArgumentParser(description='Command Line Args for Image Classifier')
+parser.add_argument("--save_lc", action="store_false", help="Save all files")
 args = parser.parse_args()
 
 gc.collect()
@@ -162,7 +161,7 @@ class PerturbationModel(nn.Module):
         residual = self.residual_out(main_deconv) # [B, 3, H, W]
         gate_mask = self.gate(x)
         gate_mask = gate_mask / (gate_mask.sum(dim=(2, 3), keepdim=True) + 1e-6)
-        gate_mask = gate_mask * (0.01 * 224 * 224)
+        gate_mask = gate_mask * (0.20 * 224 * 224)
 
         sparse_residual = residual * gate_mask
 
@@ -233,9 +232,9 @@ class CustomSACPolicy(SACPolicy):
 
         self.log_alpha = torch.nn.Parameter(torch.tensor(0.0, requires_grad=True))
 
-        self.actor.optimizer = torch.optim.Adam(self.actor.parameters(), lr=1e-4)
-        self.critic.optimizer = torch.optim.Adam(self.critic.parameters(), lr=5e-5)
-        self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=5e-5)
+        self.actor.optimizer = torch.optim.Adam(self.actor.parameters(), lr=4e-5)
+        self.critic.optimizer = torch.optim.Adam(self.critic.parameters(), lr=2e-5)
+        self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=6e-5)
 
         self.target_entropy = target_entropy
 
@@ -585,7 +584,12 @@ num_test_envs = 10
 test_data = test_dataloader(batch_size=batch_size, num_workers=0)
 eval_envs = make_vec_env(test_data, obj_classifier, num_test_envs, latent_dim)
 test_freq = 1 # every x timesteps in training
+
 time_save = time.time()
+file_path = f"main_results//{time_save}"
+if not os.path.exists(file_path):
+    os.makedirs(file_path)
+
 lpips_model = lpips.LPIPS(net='alex', spatial=True, verbose=False).to(device)
 
 laplacian_kernel = torch.tensor([[0, 1, 0],
@@ -593,6 +597,23 @@ laplacian_kernel = torch.tensor([[0, 1, 0],
                                  [0, 1, 0]], dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
 
 laplacian_kernel = laplacian_kernel.repeat(3, 1, 1, 1)  # [3,1,3,3]
+
+cls_hp = 4e2
+perc_hp = 5e1
+gate_sparsity_hp = 1e3
+large_perturb_hp = 2e1
+small_penalty_hp = 1e2
+brightness_hp = 1e5
+l1_hp = 1e-3
+gate_area_hp = 2e-4
+orthog_hp = 1e2
+high_freq_hp = 1e1
+gate_binary_hp = 1e1
+l2_hp = 1e-1
+smoothness_hp = 0e0
+l2_latent_hp = 2e0
+div_latent_hp = 2e1
+div_img_hp = 5e2
 
 encoder = Encoder(latent_dim=latent_dim, device=device)
 
@@ -713,8 +734,7 @@ def train_model(
     gradient_update_freq: int = 1,
     gamma: float = 0.95,
     tau: float = 0.005, 
-    test_freq: float = 5, 
-    visualize_lc: bool = True, 
+    test_freq: float = 5
 ):
     train_envs.reset() 
     avg_rewards = []
@@ -883,22 +903,22 @@ def train_model(
                 # 67315.75259115885 L1, 173.98226381467654 L2, 31.434739941118742 steps
                 # TODO consider using variance regularization to bound sampled action/perceptual loss (mse on latent embeddings)
                 actor_loss = (policy.alpha.detach() * log_probs - torch.min(q_new_action_a, q_new_action_b)).mean() + \
-                             4e2 * classification_loss + \
-                             5e1 * perceptual_loss + \
-                             1e3 * gate_sparsity_loss + \
-                             2e1 * large_perturb_loss + \
-                             1e2 * small_penalty_loss + \
-                             1e5 * brightness_loss + \
-                             1e-3 * l1_norm_loss + \
-                             2e-4 * gate_area_loss + \
-                             1e2 * orthogonality_loss + \
-                             1e1 * high_freq_loss
-                            #  1e1 * gate_binary_loss + \
-                            #  1e-1 * l2_norm_loss + \
-                            #  0e0 * smoothness_loss + \
-                            #  2e0 * l2_norm_loss_deltas + \
-                            #  2e1 * latent_diversity_loss + \
-                            #  5e2 * decoder_diversity_loss + \
+                             cls_hp * classification_loss + \
+                             perc_hp * perceptual_loss + \
+                             gate_sparsity_hp * gate_sparsity_loss + \
+                             large_perturb_hp * large_perturb_loss + \
+                             small_penalty_hp * small_penalty_loss + \
+                             brightness_hp * brightness_loss + \
+                             l1_hp * l1_norm_loss + \
+                             gate_area_hp * gate_area_loss + \
+                             orthog_hp * orthogonality_loss + \
+                             high_freq_hp * high_freq_loss
+                            #  gate_binary_hp * gate_binary_loss + \
+                            #  l2_hp * l2_norm_loss + \
+                            #  smoothness_hp * smoothness_loss + \
+                            #  l2_latent_hp * l2_norm_loss_deltas + \
+                            #  div_latent_hp * latent_diversity_loss + \
+                            #  div_img_hp * decoder_diversity_loss + \
                 actor_losses.append(actor_loss.item())
                 classification_losses.append(classification_loss.item())
                 # upsampled_l2_norms.append(l2_norm_loss.item())
@@ -952,32 +972,32 @@ def train_model(
         if i % test_freq == 0 and replay_buffer.length() >= 10_000: 
             rollout_val = rollout(test_envs, policy, gamma)
             if rollout_val > max_rollout_found: 
-                model.save(f"Learned_main_intermed_{time_save}.zip")
+                model.save(f"main_results//{time_save}//middle.zip")
                 max_rollout_found = rollout_val
             avg_rewards.append(rollout_val)
 
-    if visualize_lc: 
-        plot_learning_curve(avg_rewards, test_freq, f"Learned_main_{time_save}_LC.png")
-        plot_per_step(actor_losses, 1, f"Learned_main_{time_save}_actor.png", "Actor Loss")
-        plot_per_step(critic_losses, 1, f"Learned_main_{time_save}_critic.png", "Critic Loss")
-        plot_per_step(alpha_losses, 1, f"Learned_main_{time_save}_alpha.png", "Alpha Loss")
-        plot_per_step(upsampled_l1_norms, 1, f"Learned_main_{time_save}_l1.png", "Upsampled L1 Loss")
-        # plot_per_step(upsampled_l2_norms, 1, f"Learned_main_{time_save}_l2.png", "Upsampled L2 Loss")
-        # plot_per_step(smoothness_vals, 1, f"Learned_main_{time_save}_smoothness.png", "Smoothness Loss")
-        plot_per_step(classification_losses, 1, f"Learned_main_{time_save}_cls.png", "Classification Loss")
-        # plot_per_step(delta_l2_norms, 1, f"Learned_main_{time_save}_latent_l2.png", "Latent Action L2 Loss")
-        # plot_per_step(perceptual_losses, 1, f"Learned_main_{time_save}_perceptual.png", "LPIPS Perceptual Loss")
-        # plot_per_step(latent_diversity_losses, 1, f"Learned_main_{time_save}_latent_diversity.png", "Latent Diversity Loss")
-        # plot_per_step(upsampled_diversity_losses, 1, f"Learned_main_{time_save}_upsampled_diversity.png", "Decoder Diversity Loss")
-        plot_per_step(brightness_losses, 1, f"Learned_main_{time_save}_brightness.png", "Brightness Loss")
-        # plot_per_step(gate_binary_losses, 1, f"Learned_main_{time_save}_gate_binary.png", "Gate Binary Loss")
-        plot_per_step(gate_sparsity_losses, 1, f"Learned_main_{time_save}_gate_sparsity.png", "Gate Sparsity Loss")
-        plot_per_step(large_perturb_losses, 1, f"Learned_main_{time_save}_large_perturbs.png", "Large Perturbation Loss")
-        plot_per_step(small_penalty_losses, 1, f"Learned_main_{time_save}_small_penalty.png", "Small Penalty Loss")
-        plot_per_step(gate_area_losses, 1, f"Learned_main_{time_save}_gate_area.png", "Gate Area Loss")
-        plot_per_step(orthogonality_losses, 1, f"Learned_main_{time_save}_orthog.png", "Orthogonality Loss")
-        plot_per_step(high_freq_losses, 1, f"Learned_main_{time_save}_high_freq.png", "High Frequency Loss")
+    if args.save_lc: 
+        plot_learning_curve(avg_rewards, test_freq, f"main_results//{time_save}//LC.png")
+        plot_per_step(actor_losses, 1, f"main_results//{time_save}//actor.png", "Actor Loss")
+        plot_per_step(critic_losses, 1, f"main_results//{time_save}//critic.png", "Critic Loss")
+        plot_per_step(alpha_losses, 1, f"main_results//{time_save}//alpha.png", "Alpha Loss")
+        plot_per_step(upsampled_l1_norms, 1, f"main_results//{time_save}//l1.png", f"Upsampled L1 Loss, Weight {l1_hp}")
+        # plot_per_step(upsampled_l2_norms, 1, f"main_results//{time_save}//l2.png", f"Upsampled L2 Loss, Weight {l2_hp}")
+        # plot_per_step(smoothness_vals, 1, f"main_results//{time_save}//smoothness.png", f"Smoothness Loss, Weight {smoothness_hp}")
+        plot_per_step(classification_losses, 1, f"main_results//{time_save}//cls.png", f"Classification Loss, Weight {cls_hp}")
+        # plot_per_step(delta_l2_norms, 1, f"main_results//{time_save}//latent_l2.png", f"Latent Action L2 Loss, Weight {l2_latent_hp}")
+        plot_per_step(perceptual_losses, 1, f"main_results//{time_save}//perceptual.png", f"LPIPS Perceptual Loss, Weight {perc_hp}")
+        # plot_per_step(latent_diversity_losses, 1, f"main_results//{time_save}//latent_diversity.png", f"Latent Diversity Loss, Weight {div_latent_hp}")
+        # plot_per_step(upsampled_diversity_losses, 1, f"main_results//{time_save}//upsampled_diversity.png", f"Decoder Diversity Loss, Weight {div_img_hp}")
+        plot_per_step(brightness_losses, 1, f"main_results//{time_save}//brightness.png", f"Brightness Loss, Weight {brightness_hp}")
+        # plot_per_step(gate_binary_losses, 1, f"main_results//{time_save}//gate_binary.png", f"Gate Binary Loss, Weight {gate_binary_hp}")
+        plot_per_step(gate_sparsity_losses, 1, f"main_results//{time_save}//gate_sparsity.png", f"Gate Sparsity Loss, Weight {gate_sparsity_hp}")
+        plot_per_step(large_perturb_losses, 1, f"main_results//{time_save}//large_perturbs.png", f"Large Perturbation Loss, Weight {large_perturb_hp}")
+        plot_per_step(small_penalty_losses, 1, f"main_results//{time_save}//small_penalty.png", f"Small Penalty Loss, Weight {small_penalty_hp}")
+        plot_per_step(gate_area_losses, 1, f"main_results//{time_save}//gate_area.png", f"Gate Area Loss, Weight {gate_area_hp}")
+        plot_per_step(orthogonality_losses, 1, f"main_results//{time_save}//orthog.png", f"Orthogonality Loss, Weight {orthog_hp}")
+        plot_per_step(high_freq_losses, 1, f"main_results//{time_save}//high_freq.png", f"High Frequency Loss, Weight {high_freq_hp}")
 
 
-# train_model(model.env, eval_envs, model.policy, model.replay_buffer, total_timesteps=num_timesteps, batch_size=training_batch_size, gradient_update_freq=gradient_update_freq, gamma=gamma, test_freq=test_freq)
-# model.save(f"Learned_main_{time_save}.zip")
+train_model(model.env, eval_envs, model.policy, model.replay_buffer, total_timesteps=num_timesteps, batch_size=training_batch_size, gradient_update_freq=gradient_update_freq, gamma=gamma, test_freq=test_freq)
+model.save(f"main_results//{time_save}//end.zip")
