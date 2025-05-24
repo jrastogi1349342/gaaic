@@ -19,6 +19,7 @@ from environment import DataloaderEnv
 
 from utils import *
 from models import *
+from contrastive_loss import patch_clustering_contrastive
 
 # To run: python3 main/train.py
 
@@ -42,7 +43,7 @@ latent_dim = 32
 batch_size = 1 # must be 1, use multiple environments for parallel episodes
 training_batch_size = 128
 num_train_envs = 128
-num_timesteps = 80
+num_timesteps = 115
 gradient_update_freq = 128
 train_data = train_dataloader(batch_size=batch_size, num_workers=0)
 img_classifier = YOLO("yolo11n-cls.pt").to(device).eval()
@@ -68,21 +69,23 @@ laplacian_kernel = torch.tensor([[0, 1, 0],
 laplacian_kernel = laplacian_kernel.repeat(3, 1, 1, 1)  # [3,1,3,3]
 
 cls_hp = 4e2
-perc_hp = 5e1
-gate_sparsity_hp = 1e3
-large_perturb_hp = 2e1
-small_penalty_hp = 1e2
+perc_hp = 2e2
+gate_sparsity_hp = 2e3
+large_perturb_hp = 4e1
+small_penalty_hp = 1.5e2
 brightness_hp = 1e5
-l1_hp = 1e-3
-gate_area_hp = 2e-4
-orthog_hp = 1e2
-high_freq_hp = 1e1
+l1_hp = 2e-3
+gate_area_hp = 2e-5
+orthog_hp = 9e1
+high_freq_hp = 2e1
 gate_binary_hp = 1e1
 l2_hp = 1e-1
 smoothness_hp = 0e0
 l2_latent_hp = 2e0
 div_latent_hp = 2e1
 div_img_hp = 5e2
+# sal_contr_hp = 1e-1
+sal_entr_hp = 1e1
 
 encoder = Encoder(latent_dim=latent_dim, device=device)
 
@@ -172,6 +175,8 @@ def train_model(
     large_perturb_losses = []
     small_penalty_losses = []
     gate_area_losses = []
+    # sal_contr_losses = []
+    sal_entr_losses = []
     orthogonality_losses = []
     high_freq_losses = []
 
@@ -218,7 +223,6 @@ def train_model(
                     q_next_a, q_next_b = policy.critic_target(torch.cat([downsampled_next_obs, next_action_deltas], dim=1))
                     q_next = torch.min(q_next_a, q_next_b)
 
-                    # TODO check if I need to detach alpha here, since in torch.no_grad()
                     target_q = batch.rewards.unsqueeze(1) + gamma * (1 - batch.dones.unsqueeze(1)) * (q_next - policy.alpha.detach() * next_log_probs)
 
                 # Actor update
@@ -277,7 +281,7 @@ def train_model(
 
                 brightness_loss = F.mse_loss(brightness(orig_denormalized), brightness(perturbed_denormalized))
 
-                target_area = 0.01 * 224 * 224
+                target_area = 0.20 * 224 * 224
                 area = gate_mask.sum(dim=(1, 2, 3))  # per-sample
                 gate_area_loss = ((area - target_area) ** 2).mean()
 
@@ -285,13 +289,14 @@ def train_model(
                 perturb_flat = perturbed_denormalized.view(batch_size, -1)
 
                 # TODO try entropy based regularization/consistency after augmentations (self-supervised)/discriminator
-                # epsilon = 1e-6  # small value for numerical stability
-                # entropy_loss = -torch.sum(gate_mask * torch.log(gate_mask + epsilon), dim=(2,3))
+                entropy_loss = -torch.mean(gate_mask * torch.log(gate_mask + 1e-6))
 
                 orthogonality_loss = F.cosine_similarity(perturb_flat, input_flat, dim=1).mean()
 
                 high_freq = F.conv2d(perturbed_denormalized, laplacian_kernel, padding=1, groups=3)
                 high_freq_loss = -high_freq.abs().mean()
+
+                # sal_contr_loss = patch_clustering_contrastive(gate_mask)
 
                 # L2, smoothness, L1, classification weights
                 # 1e-2, 1e-3, 1e-2 for Learned_main_1745897869.9799478.zip
@@ -332,7 +337,9 @@ def train_model(
                              l1_hp * l1_norm_loss + \
                              gate_area_hp * gate_area_loss + \
                              orthog_hp * orthogonality_loss + \
-                             high_freq_hp * high_freq_loss
+                             high_freq_hp * high_freq_loss + \
+                             sal_entr_hp * entropy_loss
+                            #  sal_contr_hp * sal_contr_loss
                             #  gate_binary_hp * gate_binary_loss + \
                             #  l2_hp * l2_norm_loss + \
                             #  smoothness_hp * smoothness_loss + \
@@ -356,6 +363,8 @@ def train_model(
                 gate_area_losses.append(gate_area_loss.item())
                 orthogonality_losses.append(orthogonality_loss.item())
                 high_freq_losses.append(high_freq_loss.item())
+                # sal_contr_losses.append(sal_contr_loss.item())
+                sal_entr_losses.append(entropy_loss.item())
 
                 # if i == 9: 
                 #     display_comp_graph(classification_loss, "perturbed_probs_comp_graph")
@@ -417,6 +426,8 @@ def train_model(
         plot_per_step(gate_area_losses, 1, f"main_results//{time_save}//gate_area.png", f"Gate Area Loss, Weight {gate_area_hp}")
         plot_per_step(orthogonality_losses, 1, f"main_results//{time_save}//orthog.png", f"Orthogonality Loss, Weight {orthog_hp}")
         plot_per_step(high_freq_losses, 1, f"main_results//{time_save}//high_freq.png", f"High Frequency Loss, Weight {high_freq_hp}")
+        # plot_per_step(sal_contr_losses, 1, f"main_results//{time_save}//sal_contr.png", f"Saliency Contrastive Loss, Weight {sal_contr_hp}")
+        plot_per_step(sal_entr_losses, 1, f"main_results//{time_save}//sal_entr.png", f"Saliency Entropy Loss, Weight {sal_entr_hp}")
 
 
 train_model(model.env, eval_envs, model.policy, model.replay_buffer, total_timesteps=num_timesteps, batch_size=training_batch_size, gradient_update_freq=gradient_update_freq, gamma=gamma, test_freq=test_freq)
