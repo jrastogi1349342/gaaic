@@ -49,7 +49,7 @@ model = ZarrSAC(
     verbose=1,
 )
 
-model.load(f"main_results/1748101086.1685205/middle.zip")
+model.load(f"main_results/1748212016.3965397/110.zip")
 
 def rollout(
     envs: DummyVecEnv, 

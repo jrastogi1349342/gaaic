@@ -150,20 +150,38 @@ class PerturbationModel(nn.Module):
         
     def set_training_mode(self, mode: bool):
         self.train(mode)
+
+    # TODO check this, may be bugged b/c shapes are incorrect
+    def spatial_entropy(self, mask):
+        # mask: [B, 1, H, W], assumed normalized to [0, 1]
+        eps = 1e-8
+        flat = mask.view(mask.size(0), -1)
+        probs = flat / (flat.sum(dim=1, keepdim=True) + eps)
+        entropy = -(probs * (probs + eps).log()).sum(dim=1)  # [B]
+        return entropy
         
+    def adaptive_area(self, entropy, min_ratio=0.02, max_ratio=0.20):
+        norm_entropy = (entropy - entropy.min()) / (entropy.max() - entropy.min() + 1e-6)  # [B]
+        return min_ratio + (max_ratio - min_ratio) * norm_entropy  # [B]
+    
     def decode(self, x):
         x = self.fc(x)
 
         x = x.view(x.size(0), 256, 14, 14)
         main_deconv = self.deconv(x) # [B, 32, H, W]
         residual = self.residual_out(main_deconv) # [B, 3, H, W]
+
         gate_mask = self.gate(x)
-        gate_mask = gate_mask / (gate_mask.sum(dim=(2, 3), keepdim=True) + 1e-6)
-        gate_mask = gate_mask * (0.20 * 224 * 224)
+        gate_mask = gate_mask.clamp(min=1e-8)  # prevent log(0)
+
+        area_px = self.adaptive_area(self.spatial_entropy(gate_mask)) * 224 * 224 * 3
+        gate_sum = gate_mask.sum(dim=(2, 3), keepdim=True) + 1e-6
+        scale = area_px.view(-1, 1, 1, 1) / gate_sum
+        gate_mask = gate_mask * scale
 
         sparse_residual = residual * gate_mask
 
-        return sparse_residual, gate_mask
+        return sparse_residual, gate_mask, area_px
     
     # Bound L2 norm
     def bound_l2(self, perturbation): 
@@ -230,7 +248,7 @@ class CustomSACPolicy(SACPolicy):
 
         self.log_alpha = torch.nn.Parameter(torch.tensor(0.0, requires_grad=True))
 
-        self.actor.optimizer = torch.optim.Adam(self.actor.parameters(), lr=4e-5, weight_decay=1e-3)
+        self.actor.optimizer = torch.optim.Adam(self.actor.parameters(), lr=4e-5, weight_decay=1e-5)
         self.critic.optimizer = torch.optim.Adam(self.critic.parameters(), lr=2e-5)
         self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=6e-5)
 
@@ -306,7 +324,7 @@ class CustomSACPolicy(SACPolicy):
 
                 deltas = dist.sample()
 
-            decoded, gate_mask = self.actor.decode(latent_state + deltas)
+            decoded, gate_mask, _ = self.actor.decode(latent_state + deltas)
             decoded = decoded.squeeze(0)
 
         return deltas, decoded, gate_mask
@@ -339,10 +357,10 @@ class CustomSACPolicy(SACPolicy):
             deltas = dist.sample()
             log_prob = dist.log_prob(deltas)
 
-        actions_upsampled, gate_mask = self.actor.decode(observation + deltas)
+        actions_upsampled, gate_mask, target_area = self.actor.decode(observation + deltas)
         actions_upsampled = actions_upsampled.squeeze(0)
 
-        return observation, actions_upsampled, gate_mask, deltas, log_prob.unsqueeze(1)
+        return observation, actions_upsampled, gate_mask, target_area, deltas, log_prob.unsqueeze(1)
     
     @property
     def alpha(self): 

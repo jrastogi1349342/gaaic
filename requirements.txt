@@ -1,6 +1,5 @@
 numpy
 torch
-torchaudio
 torchvision
 ultralytics
 opencv-python
@@ -8,3 +7,4 @@ stable-baselines3
 zarr 
 numcodecs
 torchviz
+scikit-learn

@@ -19,7 +19,7 @@ from environment import DataloaderEnv
 
 from utils import *
 from models import *
-from contrastive_loss import patch_clustering_contrastive
+from contrastive_loss import contrastive_saliency_loss, ResNetProjectionHead
 
 # To run: python3 main/train.py
 
@@ -68,24 +68,27 @@ laplacian_kernel = torch.tensor([[0, 1, 0],
 
 laplacian_kernel = laplacian_kernel.repeat(3, 1, 1, 1)  # [3,1,3,3]
 
-cls_hp = 4e2
+contr_loss_resnet = ResNetProjectionHead()
+contr_sal_to_one_channel = nn.Conv2d(3, 1, kernel_size=1).to(device)
+
+cls_hp = 1e3
 perc_hp = 2e2
 gate_sparsity_hp = 2e3
-large_perturb_hp = 4e1
-small_penalty_hp = 1.5e2
-brightness_hp = 1e5
-l1_hp = 2e-3
-gate_area_hp = 2e-5
+large_perturb_hp = 5e2
+small_penalty_hp = 9e2
+brightness_hp = 5e4
+l1_hp = 3e-3
+gate_area_hp = 1e-1
 orthog_hp = 9e1
-high_freq_hp = 2e1
+high_freq_hp = 2e2
 gate_binary_hp = 1e1
 l2_hp = 1e-1
 smoothness_hp = 0e0
 l2_latent_hp = 2e0
 div_latent_hp = 2e1
 div_img_hp = 5e2
-# sal_contr_hp = 1e-1
-sal_entr_hp = 1e1
+sal_contr_hp = 2e1
+sal_entr_hp = 5e2
 
 encoder = Encoder(latent_dim=latent_dim, device=device)
 
@@ -175,10 +178,12 @@ def train_model(
     large_perturb_losses = []
     small_penalty_losses = []
     gate_area_losses = []
-    # sal_contr_losses = []
+    sal_contr_losses = []
     sal_entr_losses = []
     orthogonality_losses = []
     high_freq_losses = []
+
+    target_areas = []
 
     for i in trange(total_timesteps):
         obs_batch = np.stack([env.batch for env in train_envs.envs]).squeeze(1)  # (num_envs, C, H, W)
@@ -226,7 +231,7 @@ def train_model(
                     target_q = batch.rewards.unsqueeze(1) + gamma * (1 - batch.dones.unsqueeze(1)) * (q_next - policy.alpha.detach() * next_log_probs)
 
                 # Actor update
-                downsampled_obs, new_actions_upsampled, gate_mask, new_action_deltas, log_probs = policy.predict_action_with_prob_upsampling(latent_obs, deterministic=False)
+                downsampled_obs, new_actions_upsampled, gate_mask, target_area, new_action_deltas, log_probs = policy.predict_action_with_prob_upsampling(latent_obs, deterministic=False)
 
                 # Assume the prediction from the classifier on the original image is the true result, even if that's not true
                 orig_results, perturbed_results, orig_denormalized, perturbed_denormalized = apply_action_grad(img_classifier, batch.observations, new_actions_upsampled)
@@ -281,22 +286,20 @@ def train_model(
 
                 brightness_loss = F.mse_loss(brightness(orig_denormalized), brightness(perturbed_denormalized))
 
-                target_area = 0.20 * 224 * 224
-                area = gate_mask.sum(dim=(1, 2, 3))  # per-sample
-                gate_area_loss = ((area - target_area) ** 2).mean()
+                gate_area_loss = F.relu(gate_mask.sum(dim=(2, 3), keepdim=True) - target_area).mean()
 
                 input_flat = orig_denormalized.view(batch_size, -1)
                 perturb_flat = perturbed_denormalized.view(batch_size, -1)
 
+                orthogonality_loss = F.cosine_similarity(perturb_flat, input_flat, dim=1).mean()
+
                 # TODO try entropy based regularization/consistency after augmentations (self-supervised)/discriminator
                 entropy_loss = -torch.mean(gate_mask * torch.log(gate_mask + 1e-6))
-
-                orthogonality_loss = F.cosine_similarity(perturb_flat, input_flat, dim=1).mean()
 
                 high_freq = F.conv2d(perturbed_denormalized, laplacian_kernel, padding=1, groups=3)
                 high_freq_loss = -high_freq.abs().mean()
 
-                # sal_contr_loss = patch_clustering_contrastive(gate_mask)
+                sal_contr_loss = contrastive_saliency_loss(batch.observations, contr_sal_to_one_channel(gate_mask), contr_loss_resnet)
 
                 # L2, smoothness, L1, classification weights
                 # 1e-2, 1e-3, 1e-2 for Learned_main_1745897869.9799478.zip
@@ -338,8 +341,8 @@ def train_model(
                              gate_area_hp * gate_area_loss + \
                              orthog_hp * orthogonality_loss + \
                              high_freq_hp * high_freq_loss + \
-                             sal_entr_hp * entropy_loss
-                            #  sal_contr_hp * sal_contr_loss
+                             sal_entr_hp * entropy_loss + \
+                             sal_contr_hp * sal_contr_loss
                             #  gate_binary_hp * gate_binary_loss + \
                             #  l2_hp * l2_norm_loss + \
                             #  smoothness_hp * smoothness_loss + \
@@ -363,8 +366,9 @@ def train_model(
                 gate_area_losses.append(gate_area_loss.item())
                 orthogonality_losses.append(orthogonality_loss.item())
                 high_freq_losses.append(high_freq_loss.item())
-                # sal_contr_losses.append(sal_contr_loss.item())
+                sal_contr_losses.append(sal_contr_loss.item())
                 sal_entr_losses.append(entropy_loss.item())
+                target_areas.append(torch.mean(target_area).item())
 
                 # if i == 9: 
                 #     display_comp_graph(classification_loss, "perturbed_probs_comp_graph")
@@ -400,6 +404,7 @@ def train_model(
 
         if i % test_freq == 0 and replay_buffer.length() >= 10_000: 
             rollout_val = rollout(test_envs, policy, gamma)
+            model.save(f"main_results//{time_save}//{i}.zip")
             if rollout_val > max_rollout_found: 
                 model.save(f"main_results//{time_save}//middle.zip")
                 max_rollout_found = rollout_val
@@ -426,8 +431,9 @@ def train_model(
         plot_per_step(gate_area_losses, 1, f"main_results//{time_save}//gate_area.png", f"Gate Area Loss, Weight {gate_area_hp}")
         plot_per_step(orthogonality_losses, 1, f"main_results//{time_save}//orthog.png", f"Orthogonality Loss, Weight {orthog_hp}")
         plot_per_step(high_freq_losses, 1, f"main_results//{time_save}//high_freq.png", f"High Frequency Loss, Weight {high_freq_hp}")
-        # plot_per_step(sal_contr_losses, 1, f"main_results//{time_save}//sal_contr.png", f"Saliency Contrastive Loss, Weight {sal_contr_hp}")
+        plot_per_step(sal_contr_losses, 1, f"main_results//{time_save}//sal_contr.png", f"Saliency Contrastive Loss, Weight {sal_contr_hp}")
         plot_per_step(sal_entr_losses, 1, f"main_results//{time_save}//sal_entr.png", f"Saliency Entropy Loss, Weight {sal_entr_hp}")
+        plot_per_step(target_areas, 1, f"main_results//{time_save}//target_areas.png", f"Adaptive Area")
 
 
 train_model(model.env, eval_envs, model.policy, model.replay_buffer, total_timesteps=num_timesteps, batch_size=training_batch_size, gradient_update_freq=gradient_update_freq, gamma=gamma, test_freq=test_freq)
