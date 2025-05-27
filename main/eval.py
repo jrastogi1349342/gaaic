@@ -49,7 +49,7 @@ model = ZarrSAC(
     verbose=1,
 )
 
-model.load(f"main_results/1748212016.3965397/110.zip")
+model.load(f"main_results/1748307965.960121/end.zip")
 
 def rollout(
     envs: DummyVecEnv, 
@@ -122,7 +122,7 @@ def rollout(
         l1_norms_perturbed.append(l1_perturbed)
         l2_norms_perturbed.append(l2_perturbed)
 
-        # display_before_after(obs_tensor, perturbed_normalized_clamp, actions, info, gate_mask=gate_mask)
+        display_before_after(obs_tensor, perturbed_normalized_clamp, actions, info, gate_mask=gate_mask)
         # display_before_after_gate(obs_tensor, perturbed_normalized_clamp, info, gate_mask)
 
         # display_batch(obs_tensor)

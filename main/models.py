@@ -123,11 +123,15 @@ class PerturbationModel(nn.Module):
             nn.Tanh()
         )
 
-        # Gating mask (same spatial resolution as output)
-        self.gate = nn.Sequential(
+        # Saliency map (same spatial resolution as output)
+        self.sal_map_nn = nn.Sequential(
             nn.ConvTranspose2d(256, 3, kernel_size=32, stride=16, padding=8),
             nn.Sigmoid()  # soft gate ∈ (0,1)
         ).to(device)
+
+        self.sal_map_one_channel_nn = nn.Conv2d(3, 1, kernel_size=1).to(device)
+        with torch.no_grad():
+            self.sal_map_one_channel_nn.weight.fill_(1.0 / 3.0)
 
     # a = pi(s), for latent state s
     def forward(self, x): 
@@ -160,7 +164,7 @@ class PerturbationModel(nn.Module):
         entropy = -(probs * (probs + eps).log()).sum(dim=1)  # [B]
         return entropy
         
-    def adaptive_area(self, entropy, min_ratio=0.02, max_ratio=0.20):
+    def adaptive_area(self, entropy, min_ratio=0.0066667, max_ratio=0.066667):
         norm_entropy = (entropy - entropy.min()) / (entropy.max() - entropy.min() + 1e-6)  # [B]
         return min_ratio + (max_ratio - min_ratio) * norm_entropy  # [B]
     
@@ -171,17 +175,20 @@ class PerturbationModel(nn.Module):
         main_deconv = self.deconv(x) # [B, 32, H, W]
         residual = self.residual_out(main_deconv) # [B, 3, H, W]
 
-        gate_mask = self.gate(x)
-        gate_mask = gate_mask.clamp(min=1e-8)  # prevent log(0)
+        # 3 channels
+        sal_map = self.sal_map_nn(x)
+        sal_map = sal_map.clamp(min=1e-8)  # prevent log(0)
 
-        area_px = self.adaptive_area(self.spatial_entropy(gate_mask)) * 224 * 224 * 3
-        gate_sum = gate_mask.sum(dim=(2, 3), keepdim=True) + 1e-6
-        scale = area_px.view(-1, 1, 1, 1) / gate_sum
-        gate_mask = gate_mask * scale
+        sal_map_one_channel = self.sal_map_one_channel_nn(sal_map)
 
-        sparse_residual = residual * gate_mask
+        area_px = self.adaptive_area(self.spatial_entropy(sal_map_one_channel)) * 224 * 224 * 3
+        gate_sum = sal_map.sum(dim=(2, 3), keepdim=True) + 1e-6
+        scale = area_px.view(-1, 1, 1, 1) / gate_sum.mean(dim=1, keepdim=True)
+        sal_map = sal_map * scale
 
-        return sparse_residual, gate_mask, area_px
+        sparse_residual = residual * sal_map
+
+        return sparse_residual, sal_map, sal_map_one_channel, area_px
     
     # Bound L2 norm
     def bound_l2(self, perturbation): 
@@ -248,7 +255,7 @@ class CustomSACPolicy(SACPolicy):
 
         self.log_alpha = torch.nn.Parameter(torch.tensor(0.0, requires_grad=True))
 
-        self.actor.optimizer = torch.optim.Adam(self.actor.parameters(), lr=4e-5, weight_decay=1e-5)
+        self.actor.optimizer = torch.optim.Adam(self.actor.parameters(), lr=4e-5)
         self.critic.optimizer = torch.optim.Adam(self.critic.parameters(), lr=2e-5)
         self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=6e-5)
 
@@ -324,7 +331,7 @@ class CustomSACPolicy(SACPolicy):
 
                 deltas = dist.sample()
 
-            decoded, gate_mask, _ = self.actor.decode(latent_state + deltas)
+            decoded, gate_mask, _, _ = self.actor.decode(latent_state + deltas)
             decoded = decoded.squeeze(0)
 
         return deltas, decoded, gate_mask
@@ -357,10 +364,10 @@ class CustomSACPolicy(SACPolicy):
             deltas = dist.sample()
             log_prob = dist.log_prob(deltas)
 
-        actions_upsampled, gate_mask, target_area = self.actor.decode(observation + deltas)
+        actions_upsampled, gate_mask, one_channel_mask, target_area = self.actor.decode(observation + deltas)
         actions_upsampled = actions_upsampled.squeeze(0)
 
-        return observation, actions_upsampled, gate_mask, target_area, deltas, log_prob.unsqueeze(1)
+        return observation, actions_upsampled, gate_mask, one_channel_mask, target_area, deltas, log_prob.unsqueeze(1)
     
     @property
     def alpha(self): 

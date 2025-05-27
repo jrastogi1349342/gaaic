@@ -69,7 +69,6 @@ laplacian_kernel = torch.tensor([[0, 1, 0],
 laplacian_kernel = laplacian_kernel.repeat(3, 1, 1, 1)  # [3,1,3,3]
 
 contr_loss_resnet = ResNetProjectionHead()
-contr_sal_to_one_channel = nn.Conv2d(3, 1, kernel_size=1).to(device)
 
 cls_hp = 1e3
 perc_hp = 2e2
@@ -231,7 +230,7 @@ def train_model(
                     target_q = batch.rewards.unsqueeze(1) + gamma * (1 - batch.dones.unsqueeze(1)) * (q_next - policy.alpha.detach() * next_log_probs)
 
                 # Actor update
-                downsampled_obs, new_actions_upsampled, gate_mask, target_area, new_action_deltas, log_probs = policy.predict_action_with_prob_upsampling(latent_obs, deterministic=False)
+                downsampled_obs, new_actions_upsampled, gate_mask, one_channel_mask, target_area, new_action_deltas, log_probs = policy.predict_action_with_prob_upsampling(latent_obs, deterministic=False)
 
                 # Assume the prediction from the classifier on the original image is the true result, even if that's not true
                 orig_results, perturbed_results, orig_denormalized, perturbed_denormalized = apply_action_grad(img_classifier, batch.observations, new_actions_upsampled)
@@ -299,7 +298,7 @@ def train_model(
                 high_freq = F.conv2d(perturbed_denormalized, laplacian_kernel, padding=1, groups=3)
                 high_freq_loss = -high_freq.abs().mean()
 
-                sal_contr_loss = contrastive_saliency_loss(batch.observations, contr_sal_to_one_channel(gate_mask), contr_loss_resnet)
+                sal_contr_loss = contrastive_saliency_loss(batch.observations, one_channel_mask, contr_loss_resnet)
 
                 # L2, smoothness, L1, classification weights
                 # 1e-2, 1e-3, 1e-2 for Learned_main_1745897869.9799478.zip
