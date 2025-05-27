@@ -155,19 +155,25 @@ class PerturbationModel(nn.Module):
     def set_training_mode(self, mode: bool):
         self.train(mode)
 
-    # TODO check this, may be bugged b/c shapes are incorrect
-    def spatial_entropy(self, mask):
-        # mask: [B, 1, H, W], assumed normalized to [0, 1]
-        eps = 1e-8
-        flat = mask.view(mask.size(0), -1)
-        probs = flat / (flat.sum(dim=1, keepdim=True) + eps)
-        entropy = -(probs * (probs + eps).log()).sum(dim=1)  # [B]
-        return entropy
+    def spatial_entropy(self, mask, window_size=11, eps=1e-8):
+        # Normalize to probability distribution per image
+        mask = mask / (mask.sum(dim=(2, 3), keepdim=True) + eps)
+
+        # Compute entropy over local windows
+        p = torch.clamp(mask, min=eps)
+        logp = p.log()
+        entropy = -p * logp  # [B, 1, H, W]
+
+        # Local averaging (moving window)
+        local_entropy = F.avg_pool2d(entropy, kernel_size=window_size, stride=1, padding=window_size // 2)
+
+        # Return mean local entropy per sample
+        return local_entropy.mean(dim=(1, 2, 3))  # [B]
         
-    def adaptive_area(self, entropy, min_ratio=0.0066667, max_ratio=0.066667):
+    def adaptive_area(self, entropy, min_ratio=0.0066667, max_ratio=0.066667, alpha=5.0):
         norm_entropy = (entropy - entropy.min()) / (entropy.max() - entropy.min() + 1e-6)  # [B]
-        return min_ratio + (max_ratio - min_ratio) * norm_entropy  # [B]
-    
+        return min_ratio + (max_ratio - min_ratio) * torch.sigmoid(alpha * (1 - norm_entropy))
+        
     def decode(self, x):
         x = self.fc(x)
 
@@ -181,14 +187,16 @@ class PerturbationModel(nn.Module):
 
         sal_map_one_channel = self.sal_map_one_channel_nn(sal_map)
 
-        area_px = self.adaptive_area(self.spatial_entropy(sal_map_one_channel)) * 224 * 224 * 3
+        entropy = self.spatial_entropy(sal_map_one_channel)
+
+        area_px = self.adaptive_area(entropy) * 224 * 224 * 3
         gate_sum = sal_map.sum(dim=(2, 3), keepdim=True) + 1e-6
         scale = area_px.view(-1, 1, 1, 1) / gate_sum.mean(dim=1, keepdim=True)
         sal_map = sal_map * scale
 
         sparse_residual = residual * sal_map
 
-        return sparse_residual, sal_map, sal_map_one_channel, area_px
+        return sparse_residual, sal_map, sal_map_one_channel, entropy, area_px
     
     # Bound L2 norm
     def bound_l2(self, perturbation): 
@@ -331,7 +339,7 @@ class CustomSACPolicy(SACPolicy):
 
                 deltas = dist.sample()
 
-            decoded, gate_mask, _, _ = self.actor.decode(latent_state + deltas)
+            decoded, gate_mask, _, _, _ = self.actor.decode(latent_state + deltas)
             decoded = decoded.squeeze(0)
 
         return deltas, decoded, gate_mask
@@ -364,10 +372,10 @@ class CustomSACPolicy(SACPolicy):
             deltas = dist.sample()
             log_prob = dist.log_prob(deltas)
 
-        actions_upsampled, gate_mask, one_channel_mask, target_area = self.actor.decode(observation + deltas)
+        actions_upsampled, gate_mask, one_channel_mask, entropy, target_area = self.actor.decode(observation + deltas)
         actions_upsampled = actions_upsampled.squeeze(0)
 
-        return observation, actions_upsampled, gate_mask, one_channel_mask, target_area, deltas, log_prob.unsqueeze(1)
+        return observation, actions_upsampled, gate_mask, one_channel_mask, entropy, target_area, deltas, log_prob.unsqueeze(1)
     
     @property
     def alpha(self): 

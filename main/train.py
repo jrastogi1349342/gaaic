@@ -70,23 +70,23 @@ laplacian_kernel = laplacian_kernel.repeat(3, 1, 1, 1)  # [3,1,3,3]
 
 contr_loss_resnet = ResNetProjectionHead()
 
-cls_hp = 1e3
-perc_hp = 2e2
+cls_hp = 1e2
+perc_hp = 2e1
 gate_sparsity_hp = 2e3
-large_perturb_hp = 5e2
-small_penalty_hp = 9e2
-brightness_hp = 5e4
-l1_hp = 3e-3
+large_perturb_hp = 5e1
+small_penalty_hp = 9e1
+brightness_hp = 5e3
+l1_hp = 3e-5
 gate_area_hp = 1e-1
-orthog_hp = 9e1
-high_freq_hp = 2e2
-gate_binary_hp = 1e1
-l2_hp = 1e-1
+orthog_hp = 9e0
+high_freq_hp = 2e1
+gate_binary_hp = 0e0
+l2_hp = 1e-0
 smoothness_hp = 0e0
-l2_latent_hp = 2e0
-div_latent_hp = 2e1
-div_img_hp = 5e2
-sal_contr_hp = 2e1
+l2_latent_hp = 2e-1
+div_latent_hp = 2e0
+div_img_hp = 5e1
+sal_contr_hp = 2e2
 sal_entr_hp = 5e2
 
 encoder = Encoder(latent_dim=latent_dim, device=device)
@@ -230,7 +230,7 @@ def train_model(
                     target_q = batch.rewards.unsqueeze(1) + gamma * (1 - batch.dones.unsqueeze(1)) * (q_next - policy.alpha.detach() * next_log_probs)
 
                 # Actor update
-                downsampled_obs, new_actions_upsampled, gate_mask, one_channel_mask, target_area, new_action_deltas, log_probs = policy.predict_action_with_prob_upsampling(latent_obs, deterministic=False)
+                downsampled_obs, new_actions_upsampled, gate_mask, one_channel_mask, entropy, target_area, new_action_deltas, log_probs = policy.predict_action_with_prob_upsampling(latent_obs, deterministic=False)
 
                 # Assume the prediction from the classifier on the original image is the true result, even if that's not true
                 orig_results, perturbed_results, orig_denormalized, perturbed_denormalized = apply_action_grad(img_classifier, batch.observations, new_actions_upsampled)
@@ -285,15 +285,15 @@ def train_model(
 
                 brightness_loss = F.mse_loss(brightness(orig_denormalized), brightness(perturbed_denormalized))
 
-                gate_area_loss = F.relu(gate_mask.sum(dim=(2, 3), keepdim=True) - target_area).mean()
+                gate_area_loss = F.relu(one_channel_mask.sum(dim=(2, 3), keepdim=True) - target_area).mean()
 
                 input_flat = orig_denormalized.view(batch_size, -1)
                 perturb_flat = perturbed_denormalized.view(batch_size, -1)
 
                 orthogonality_loss = F.cosine_similarity(perturb_flat, input_flat, dim=1).mean()
 
-                # TODO try entropy based regularization/consistency after augmentations (self-supervised)/discriminator
-                entropy_loss = -torch.mean(gate_mask * torch.log(gate_mask + 1e-6))
+                # TODO try consistency after augmentations (self-supervised)/discriminator
+                entropy_loss = torch.mean(entropy)
 
                 high_freq = F.conv2d(perturbed_denormalized, laplacian_kernel, padding=1, groups=3)
                 high_freq_loss = -high_freq.abs().mean()
