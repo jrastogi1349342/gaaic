@@ -28,7 +28,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 gamma = 0.5
 latent_dim = 32
 batch_size = 1 # must be 1, use multiple environments for parallel episodes
-num_val_envs = 32
+num_val_envs = 64
 num_timesteps = 1000
 val_data = train_dataloader(batch_size=batch_size, num_workers=0)
 obj_classifier = YOLO("yolo11n-cls.pt").to(device).eval()
@@ -49,7 +49,7 @@ model = ZarrSAC(
     verbose=1,
 )
 
-model.load(f"main_results/1748373928.976949/middle.zip")
+model.load(f"main_results/1748385495.5655284/110.zip")
 
 def rollout(
     envs: DummyVecEnv, 
@@ -150,4 +150,4 @@ print(f"""Avg L1 norm of original: {np.mean(l1_orig)}\tAvg L2 norm of original: 
       \tAvg L1 norm of perturbed img: {np.mean(l1_full)}\tAvg L2 norm of perturbed img: {np.mean(l2_full)}
       \tAvg num steps per episode: {cls_num_steps}""")
 
-heatmap(closest_classes, file_name="main/learned_before_after_labels.png", k=80)
+# heatmap(closest_classes, file_name="main/learned_before_after_labels.png", k=80)

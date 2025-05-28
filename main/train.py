@@ -50,7 +50,7 @@ img_classifier = YOLO("yolo11n-cls.pt").to(device).eval()
 
 train_envs = make_vec_env(train_data, num_train_envs, latent_dim)
 
-num_test_envs = 20
+num_test_envs = 64
 test_data = test_dataloader(batch_size=batch_size, num_workers=0)
 eval_envs = make_vec_env(test_data, num_test_envs, latent_dim)
 test_freq = 1 # every x timesteps in training
@@ -73,19 +73,19 @@ contr_loss_resnet = ResNetProjectionHead()
 cls_hp = 1e2
 perc_hp = 2e1
 gate_sparsity_hp = 2e3
-large_perturb_hp = 5e1
-small_penalty_hp = 9e1
-brightness_hp = 5e3
-l1_hp = 3e-5
-gate_area_hp = 1e-1
-orthog_hp = 9e0
-high_freq_hp = 2e1
+large_perturb_hp = 0e0
+small_penalty_hp = 0e0
+brightness_hp = 0e0
+l1_hp = 3e-6
+gate_area_hp = 0e0
+orthog_hp = 0e0
+high_freq_hp = 0e0
 gate_binary_hp = 0e0
-l2_hp = 1e-0
+l2_hp = 0e0
 smoothness_hp = 0e0
-l2_latent_hp = 2e-1
-div_latent_hp = 2e0
-div_img_hp = 5e1
+l2_latent_hp = 0e0
+div_latent_hp = 0e0
+div_img_hp = 0e0
 sal_contr_hp = 2e2
 sal_entr_hp = 5e2
 
@@ -367,7 +367,7 @@ def train_model(
                 high_freq_losses.append(high_freq_loss.item())
                 sal_contr_losses.append(sal_contr_loss.item())
                 sal_entr_losses.append(entropy_loss.item())
-                target_areas.append(torch.mean(target_area).item())
+                target_areas.append((torch.mean(target_area) / ((224 ** 2) * 3)).item())
 
                 # if i == 9: 
                 #     display_comp_graph(classification_loss, "perturbed_probs_comp_graph")
