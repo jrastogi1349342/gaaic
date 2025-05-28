@@ -49,7 +49,7 @@ model = ZarrSAC(
     verbose=1,
 )
 
-model.load(f"main_results/1748385495.5655284/110.zip")
+model.load(f"main_results/1748443531.5331786/middle.zip")
 
 def rollout(
     envs: DummyVecEnv, 
@@ -122,7 +122,7 @@ def rollout(
         l1_norms_perturbed.append(l1_perturbed)
         l2_norms_perturbed.append(l2_perturbed)
 
-        display_before_after(obs_tensor, perturbed_normalized_clamp, actions, info, gate_mask=gate_mask)
+        # display_before_after(obs_tensor, perturbed_normalized_clamp, actions, info, gate_mask=gate_mask)
         # display_before_after_gate(obs_tensor, perturbed_normalized_clamp, info, gate_mask)
 
         # display_batch(obs_tensor)
@@ -150,4 +150,4 @@ print(f"""Avg L1 norm of original: {np.mean(l1_orig)}\tAvg L2 norm of original: 
       \tAvg L1 norm of perturbed img: {np.mean(l1_full)}\tAvg L2 norm of perturbed img: {np.mean(l2_full)}
       \tAvg num steps per episode: {cls_num_steps}""")
 
-# heatmap(closest_classes, file_name="main/learned_before_after_labels.png", k=80)
+heatmap(closest_classes, file_name="main/learned_before_after_labels.png", k=80)

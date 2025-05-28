@@ -71,13 +71,13 @@ laplacian_kernel = laplacian_kernel.repeat(3, 1, 1, 1)  # [3,1,3,3]
 contr_loss_resnet = ResNetProjectionHead()
 
 cls_hp = 1e2
-perc_hp = 2e1
-gate_sparsity_hp = 2e3
+perc_hp = 2e2
+gate_sparsity_hp = 0e0
 large_perturb_hp = 0e0
 small_penalty_hp = 0e0
 brightness_hp = 0e0
-l1_hp = 3e-6
-gate_area_hp = 0e0
+l1_hp = 0e0
+gate_area_hp = 1e-3
 orthog_hp = 0e0
 high_freq_hp = 0e0
 gate_binary_hp = 0e0
@@ -86,8 +86,8 @@ smoothness_hp = 0e0
 l2_latent_hp = 0e0
 div_latent_hp = 0e0
 div_img_hp = 0e0
-sal_contr_hp = 2e2
-sal_entr_hp = 5e2
+sal_contr_hp = 2e1
+sal_entr_hp = 0e0
 
 encoder = Encoder(latent_dim=latent_dim, device=device)
 
