@@ -19,7 +19,7 @@ from environment import DataloaderEnv
 
 from utils import *
 from models import *
-from contrastive_loss import contrastive_saliency_loss, ResNetProjectionHead
+from contrastive_loss import *
 
 # To run: python3 main/train.py
 
@@ -67,8 +67,6 @@ laplacian_kernel = torch.tensor([[0, 1, 0],
                                  [0, 1, 0]], dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
 
 laplacian_kernel = laplacian_kernel.repeat(3, 1, 1, 1)  # [3,1,3,3]
-
-contr_loss_resnet = ResNetProjectionHead()
 
 cls_hp = 1e2
 perc_hp = 2e2
@@ -158,8 +156,10 @@ def train_model(
     test_freq: float = 5
 ):
     train_envs.reset() 
+
     avg_rewards = []
     max_rollout_found = -np.inf
+
     actor_losses = []
     critic_losses = []
     alpha_losses = []
@@ -216,8 +216,8 @@ def train_model(
                 policy.alpha_optimizer.zero_grad()
 
                 with torch.no_grad():
-                    latent_obs = policy.feature_encoder(batch.observations)
-                    latent_next_obs = policy.feature_encoder(batch.next_observations)
+                    curr_spatial, latent_obs = policy.feature_encoder(batch.observations)
+                    _, latent_next_obs = policy.feature_encoder(batch.next_observations)
 
                 # downsampled_obs = policy.actor.downsampled_enc(latent_obs)
                 downsampled_next_obs = policy.actor.downsampled_enc(latent_next_obs)
@@ -230,7 +230,7 @@ def train_model(
                     target_q = batch.rewards.unsqueeze(1) + gamma * (1 - batch.dones.unsqueeze(1)) * (q_next - policy.alpha.detach() * next_log_probs)
 
                 # Actor update
-                downsampled_obs, new_actions_upsampled, gate_mask, one_channel_mask, entropy, target_area, new_action_deltas, log_probs = policy.predict_action_with_prob_upsampling(latent_obs, deterministic=False)
+                downsampled_obs, new_actions_upsampled, gate_mask, one_channel_mask, entropy, target_area, new_action_deltas, log_probs = policy.predict_action_with_prob_upsampling(curr_spatial, latent_obs, deterministic=False)
 
                 # Assume the prediction from the classifier on the original image is the true result, even if that's not true
                 orig_results, perturbed_results, orig_denormalized, perturbed_denormalized = apply_action_grad(img_classifier, batch.observations, new_actions_upsampled)
@@ -298,7 +298,7 @@ def train_model(
                 high_freq = F.conv2d(perturbed_denormalized, laplacian_kernel, padding=1, groups=3)
                 high_freq_loss = -high_freq.abs().mean()
 
-                sal_contr_loss = contrastive_saliency_loss(batch.observations, one_channel_mask, contr_loss_resnet)
+                sal_contr_loss = attention_contrastive_loss(batch.observations, new_actions_upsampled, one_channel_mask, policy.feature_encoder, policy.actor.contr_loss_forward)
 
                 # L2, smoothness, L1, classification weights
                 # 1e-2, 1e-3, 1e-2 for Learned_main_1745897869.9799478.zip
@@ -403,7 +403,8 @@ def train_model(
 
         if i % test_freq == 0 and replay_buffer.length() >= 10_000: 
             rollout_val = rollout(test_envs, policy, gamma)
-            model.save(f"main_results//{time_save}//{i}.zip")
+            if i % 10 == 0: 
+                model.save(f"main_results//{time_save}//{i}.zip")
             if rollout_val > max_rollout_found: 
                 model.save(f"main_results//{time_save}//middle.zip")
                 max_rollout_found = rollout_val

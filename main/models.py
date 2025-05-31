@@ -45,12 +45,17 @@ class Encoder(nn.Module):
         super().__init__()
         
         # TODO fix code for if weights are not pretrained
-        # 166 MB VRAM
         model_base = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
+        full_model = list(model_base.children())
+
         # Yields 512 dim vector 
-        self.encoder = nn.Sequential(*list(model_base.children())[:-1]).to(device) # remove head
+        self.encoder = nn.Sequential(*full_model[:-2]).to(device) # remove head and last pooling: [B, 512, H/32, W/32]
+        self.pooling = full_model[-2].to(device) # last pooling op only
 
         for param in self.encoder.parameters(): 
+            param.requires_grad = False
+
+        for param in self.pooling.parameters(): 
             param.requires_grad = False
 
         for module in self.encoder.modules():
@@ -58,9 +63,100 @@ class Encoder(nn.Module):
                 module.train()
 
     def forward(self, x): 
-        x = self.encoder(x).squeeze(-1).squeeze(-1)
+        x = self.encoder(x)
 
-        return x
+        return x, self.pooling(x).squeeze(-1).squeeze(-1)
+    
+# Saliency map
+class SaliencyMap(nn.Module):
+    def __init__(self, latent_dim, token_dim=512, num_heads=4, device="cuda"):
+        super().__init__()
+
+        self.device = device
+
+        # Positional Encoding
+        self.pos_embed = self.img_pos_embedding(token_dim, 7, 7)  # For 224x224 input
+        self.pos_embed = self.pos_embed.to(device)
+        # self.pos_proj = nn.Linear(token_dim * 2, token_dim)
+
+        # Action projection
+        self.lat_action_upsampler = nn.Linear(latent_dim, token_dim).to(device)
+        self.token_proj = nn.Linear(token_dim * 2, token_dim).to(device)
+
+        # Cross-attention
+        self.mh_attn = nn.MultiheadAttention(token_dim, num_heads, batch_first=True).to(device)
+        self.layer_norm = nn.LayerNorm(token_dim).to(device)
+
+        # Linear fine b/c operating over flattened tokens, not features
+        self.saliency_head = nn.Sequential(
+            nn.Linear(token_dim, token_dim // 4),
+            nn.ReLU(),
+            nn.Linear(token_dim // 4, 3)
+        ).to(device)
+
+        # Upsampling decoder (ConvTranspose2d)
+        self.decoder = nn.Sequential(
+            nn.ConvTranspose2d(3, 32, kernel_size=4, stride=2, padding=1),  # x2
+            nn.ReLU(),
+            nn.ConvTranspose2d(32, 64, kernel_size=4, stride=2, padding=1),  # x2
+            nn.ReLU(),
+            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),   # x2
+            nn.ReLU(),
+            nn.ConvTranspose2d(32, 16, kernel_size=4, stride=2, padding=1),   # x2
+            nn.ReLU(),
+            nn.ConvTranspose2d(16, 3, kernel_size=4, stride=2, padding=1),   # x2
+        ).to(device)
+
+        # Don't treat RGB as independent channels (already done somewhat through cross attention above)
+        self.channel_mixer = nn.Conv2d(3, 3, kernel_size=1, groups=1).to(device)
+
+        # Convert to 1 channel
+        self.sal_map_one_channel_nn = nn.Conv2d(3, 1, kernel_size=1).to(device)
+
+    # latent_spatial_state is # [B, 512, h, w] where h=w=7
+    def forward(self, latent_spatial_state, latent_action):
+        B, D, h, w = latent_spatial_state.shape
+        tokens = latent_spatial_state.flatten(2).transpose(1, 2)  # [B, N, D] where N = h*w
+
+        # Add positional encoding
+        pos_embedding = self.pos_embed.to(tokens.device).unsqueeze(0).expand(B, -1, -1)  # [B, N, D]
+        tokens = self.token_proj(torch.cat([tokens, pos_embedding], dim=-1))  # [B, N, D]
+        tokens = self.layer_norm(tokens)
+
+        # Cross-attention
+        query = self.lat_action_upsampler(latent_action).unsqueeze(1)  # [B, 1, D]
+        query = self.layer_norm(query)
+
+        attn_out, _ = self.mh_attn(query=query, key=tokens, value=tokens)  # [B, 1, D]
+        attn_out = self.layer_norm(attn_out)
+
+        fused_tokens = tokens + attn_out.expand_as(tokens)  # [B, N, D]
+
+        # Saliency map prediction
+        saliency = self.saliency_head(fused_tokens).transpose(1, 2).view(B, 3, h, w)  # [B, 3, h, w]
+
+        # Learnable upsampling instead of interpolation
+        saliency_upsampled = self.decoder(saliency)  # [B, 3, H, W] (e.g., 56x56 -> 224x224)
+        saliency_upsampled = self.channel_mixer(saliency_upsampled)
+
+        return saliency_upsampled, self.sal_map_one_channel_nn(saliency_upsampled)
+
+    def img_pos_embedding(self, dim, h, w):
+        grid_y, grid_x = torch.meshgrid(torch.arange(h), torch.arange(w), indexing="ij")
+        grid = torch.stack([grid_x, grid_y], dim=0).float().to(self.device)  # [2, H, W]
+        grid = grid / torch.tensor([w, h], device=self.device).view(2, 1, 1) * 2 * torch.pi
+
+        emb_h = self._sin_cos_embed(grid[0], dim // 2)
+        emb_w = self._sin_cos_embed(grid[1], dim // 2)
+        return torch.cat([emb_h, emb_w], dim=-1).view(h * w, dim)
+
+    def _sin_cos_embed(self, pos, d_model_half):
+        div_term = torch.exp(torch.arange(0, d_model_half, 2).to(self.device) * -(torch.log(torch.tensor(10000.0)) / d_model_half))
+        pos = pos.unsqueeze(-1)
+        pe = torch.zeros(*pos.shape[:-1], d_model_half, device=self.device)
+        pe[..., 0::2] = torch.sin(pos * div_term)
+        pe[..., 1::2] = torch.cos(pos * div_term)
+        return pe
 
 # Actor
 class PerturbationModel(nn.Module): 
@@ -75,9 +171,10 @@ class PerturbationModel(nn.Module):
         self.batch_size = batch_size
 
         self.downsampled_enc = nn.Sequential(
-            nn.Linear(512, latent_dim), 
-            nn.BatchNorm1d(latent_dim),
-            nn.LeakyReLU(inplace=False)
+            nn.Linear(512, 128), 
+            nn.BatchNorm1d(128),
+            nn.LeakyReLU(inplace=False),
+            torch.nn.Linear(128, latent_dim), 
         ).to(device)
 
         # Gaussian distribution in latent space
@@ -96,7 +193,7 @@ class PerturbationModel(nn.Module):
         self.fc = nn.Sequential(
             nn.Linear(latent_dim, 256 * 14 * 14), 
             nn.BatchNorm1d(256 * 14 * 14),
-            nn.ReLU(inplace=True)
+            nn.LeakyReLU(inplace=True)
         ).to(device)
 
         # TODO optimize memory with groups, fusing conv and batchnorm, etc if possible
@@ -115,23 +212,14 @@ class PerturbationModel(nn.Module):
 
             nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1, bias=False), 
             nn.GroupNorm(8, 32), 
-            nn.ReLU(inplace=True)
-        ).to(device)
-
-        self.residual_out = nn.Sequential(
-            nn.ConvTranspose2d(32, 3, kernel_size=4, stride=2, padding=1, bias=False).to(device), 
+            nn.ReLU(inplace=True), 
+            
+            nn.ConvTranspose2d(32, 3, kernel_size=4, stride=2, padding=1, bias=False), 
             nn.Tanh()
-        )
+        ).to(device)
 
         # Saliency map (same spatial resolution as output)
-        self.sal_map_nn = nn.Sequential(
-            nn.ConvTranspose2d(256, 3, kernel_size=32, stride=16, padding=8),
-            nn.Sigmoid()  # soft gate ∈ (0,1)
-        ).to(device)
-
-        self.sal_map_one_channel_nn = nn.Conv2d(3, 1, kernel_size=1).to(device)
-        with torch.no_grad():
-            self.sal_map_one_channel_nn.weight.fill_(1.0 / 3.0)
+        self.mha_sal = SaliencyMap(latent_dim, device=device)
 
     # a = pi(s), for latent state s
     def forward(self, x): 
@@ -172,31 +260,31 @@ class PerturbationModel(nn.Module):
         
     def adaptive_area(self, entropy, min_ratio=0.0066667, max_ratio=0.066667, alpha=5.0):
         norm_entropy = (entropy - entropy.min()) / (entropy.max() - entropy.min() + 1e-6)  # [B]
-        return min_ratio + (max_ratio - min_ratio) * torch.sigmoid(alpha * (1 - norm_entropy))
+        return min_ratio + (max_ratio - min_ratio) * torch.sigmoid(-alpha * (norm_entropy - 0.5))
         
-    def decode(self, x):
+    def decode(self, latent_state_spatial, latent_state, action_delta):
+        x = latent_state + action_delta
+
         x = self.fc(x)
 
         x = x.view(x.size(0), 256, 14, 14)
-        main_deconv = self.deconv(x) # [B, 32, H, W]
-        residual = self.residual_out(main_deconv) # [B, 3, H, W]
+        full_noise = self.deconv(x) # [B, 3, H, W]
 
-        # 3 channels
-        sal_map = self.sal_map_nn(x)
-        sal_map = sal_map.clamp(min=1e-8)  # prevent log(0)
+        sal_map_three_ch, sal_map_one_ch = self.mha_sal(latent_state_spatial, action_delta)
 
-        sal_map_one_channel = self.sal_map_one_channel_nn(sal_map)
-
-        entropy = self.spatial_entropy(sal_map_one_channel)
+        entropy = self.spatial_entropy(sal_map_one_ch)
 
         area_px = self.adaptive_area(entropy) * 224 * 224 * 3
-        gate_sum = sal_map.sum(dim=(2, 3), keepdim=True) + 1e-6
+        gate_sum = sal_map_three_ch.sum(dim=(2, 3), keepdim=True) + 1e-6
         scale = area_px.view(-1, 1, 1, 1) / gate_sum.mean(dim=1, keepdim=True)
-        sal_map = sal_map * scale
+        sal_map_three_ch = sal_map_three_ch * scale
 
-        sparse_residual = residual * sal_map
+        sparse_noise = full_noise * sal_map_three_ch
 
-        return sparse_residual, sal_map, sal_map_one_channel, entropy, area_px
+        return sparse_noise, sal_map_three_ch, sal_map_one_ch, entropy, area_px
+    
+    def contr_loss_forward(self, x): # [B, 512]
+        return F.normalize(self.downsampled_enc(x), dim=1)  # [B, latent_dim]
     
     # Bound L2 norm
     def bound_l2(self, perturbation): 
@@ -253,7 +341,7 @@ class CustomSACPolicy(SACPolicy):
         self.observation_space = observation_space
         self.action_space = action_space
 
-        self.actor = PerturbationModel(latent_dim, device=device, batch_size=batch_size)
+        self.actor = PerturbationModel(latent_dim, encoder.encoder, batch_size, device=device)
 
         # Input: concatenated state and action latent vectors
         self.critic = Critic(latent_dim=latent_dim, device=self.device)
@@ -327,10 +415,10 @@ class CustomSACPolicy(SACPolicy):
         
     def pred_upsampled_action(self, observation, deterministic=False): 
         with torch.no_grad(): 
-            resnet_state = self.feature_encoder(observation)
+            spatial, resnet_vec = self.feature_encoder(observation)
 
             # Actor: Forward pass through the actor network (returns logits for actions)
-            latent_state, mus, cov_mtxs = self.actor(resnet_state)
+            latent_state, mus, cov_mtxs = self.actor(resnet_vec)
 
             if deterministic: 
                 deltas = mus
@@ -339,7 +427,7 @@ class CustomSACPolicy(SACPolicy):
 
                 deltas = dist.sample()
 
-            decoded, gate_mask, _, _, _ = self.actor.decode(latent_state + deltas)
+            decoded, gate_mask, _, _, _ = self.actor.decode(spatial, latent_state, deltas)
             decoded = decoded.squeeze(0)
 
         return deltas, decoded, gate_mask
@@ -360,7 +448,7 @@ class CustomSACPolicy(SACPolicy):
         return deltas, torch.clamp(log_prob, min=-20, max=0)
 
     # Note: observation is already latent vector
-    def predict_action_with_prob_upsampling(self, observation, deterministic = False):
+    def predict_action_with_prob_upsampling(self, spatial, observation, deterministic = False):
         observation, mus, cov_mtxs = self.actor(observation)
         log_prob = None
         
@@ -372,7 +460,7 @@ class CustomSACPolicy(SACPolicy):
             deltas = dist.sample()
             log_prob = dist.log_prob(deltas)
 
-        actions_upsampled, gate_mask, one_channel_mask, entropy, target_area = self.actor.decode(observation + deltas)
+        actions_upsampled, gate_mask, one_channel_mask, entropy, target_area = self.actor.decode(spatial, observation, deltas)
         actions_upsampled = actions_upsampled.squeeze(0)
 
         return observation, actions_upsampled, gate_mask, one_channel_mask, entropy, target_area, deltas, log_prob.unsqueeze(1)
