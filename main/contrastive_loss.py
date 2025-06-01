@@ -222,18 +222,39 @@ import random
 
 #     return loss_pos + loss_neg
 
+def get_coords(H, W, device):
+    yy, xx = torch.meshgrid(torch.arange(H, device=device), torch.arange(W, device=device), indexing="ij")
+    coords = torch.stack([yy, xx], dim=-1).view(-1, 2)  # [H*W, 2]
+    return coords  # [H*W, 2]
 
-def attention_contrastive_loss(orig, pert, saliency_map, resnet, downsampler, patch_size=16, k=10, temperature=0.2):
+def attention_contrastive_loss(orig, pert, saliency_map, px_locations, resnet, downsampler, patch_size=16, k=10, oversample_factor=5, min_dist=10, temperature=0.2):
     B, _, H, W = orig.shape
     device = orig.device
+    num_samples = k * oversample_factor
 
     # Normalize and flatten saliency
-    saliency_map = saliency_map.clamp(min=0)
-    saliency = saliency_map.view(B, -1)
-    saliency = saliency / (saliency.sum(dim=1, keepdim=True) + 1e-8)
+    saliency_map = saliency_map.clamp(min=1e-8)
+    saliency_map = saliency_map.view(B, -1)
+    saliency_map = saliency_map / (saliency_map.sum(dim=1, keepdim=True) + 1e-8)
 
     # Sample k locations from high-saliency
-    idx = torch.multinomial(saliency, k, replacement=False)  # [B, k]
+    sampled_idx = torch.multinomial(saliency_map, num_samples, replacement=False)
+    sampled_coords = px_locations[sampled_idx]  # [num_samples, 2]
+
+    selected = []
+    for i in range(sampled_coords.size(0)):
+        if len(selected) == 0:
+            selected.append(i)
+            continue
+        dists = (sampled_coords[i] - sampled_coords[selected]).float().norm(dim=1)
+        if (dists >= min_dist).all():
+            selected.append(i)
+        if len(selected) >= k:
+            break
+
+    idx = sampled_idx[:, selected] if len(selected) > 0 else sampled_idx[:, :k]
+
+    # idx = torch.multinomial(saliency_map, k, replacement=False)  # [B, k]
 
     patches_orig = []
     patches_pert = []

@@ -268,7 +268,7 @@ class PerturbationModel(nn.Module):
         x = self.fc(x)
 
         x = x.view(x.size(0), 256, 14, 14)
-        full_noise = self.deconv(x) # [B, 3, H, W]
+        full_noise = self.deconv(x) * 2 # [B, 3, H, W], [-2, 2]
 
         sal_map_three_ch, sal_map_one_ch = self.mha_sal(latent_state_spatial, action_delta)
 

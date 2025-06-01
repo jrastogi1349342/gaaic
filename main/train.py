@@ -68,6 +68,8 @@ laplacian_kernel = torch.tensor([[0, 1, 0],
 
 laplacian_kernel = laplacian_kernel.repeat(3, 1, 1, 1)  # [3,1,3,3]
 
+coords = get_coords(224, 224, device=device)
+
 cls_hp = 1e2
 perc_hp = 2e2
 gate_sparsity_hp = 0e0
@@ -75,7 +77,7 @@ large_perturb_hp = 0e0
 small_penalty_hp = 0e0
 brightness_hp = 0e0
 l1_hp = 0e0
-gate_area_hp = 1e-3
+gate_area_hp = 1e-1
 orthog_hp = 0e0
 high_freq_hp = 0e0
 gate_binary_hp = 0e0
@@ -85,7 +87,7 @@ l2_latent_hp = 0e0
 div_latent_hp = 0e0
 div_img_hp = 0e0
 sal_contr_hp = 2e1
-sal_entr_hp = 0e0
+sal_entr_hp = 1e1
 
 encoder = Encoder(latent_dim=latent_dim, device=device)
 
@@ -298,7 +300,7 @@ def train_model(
                 high_freq = F.conv2d(perturbed_denormalized, laplacian_kernel, padding=1, groups=3)
                 high_freq_loss = -high_freq.abs().mean()
 
-                sal_contr_loss = attention_contrastive_loss(batch.observations, new_actions_upsampled, one_channel_mask, policy.feature_encoder, policy.actor.contr_loss_forward)
+                sal_contr_loss = attention_contrastive_loss(batch.observations, new_actions_upsampled, one_channel_mask, coords, policy.feature_encoder, policy.actor.contr_loss_forward)
 
                 # L2, smoothness, L1, classification weights
                 # 1e-2, 1e-3, 1e-2 for Learned_main_1745897869.9799478.zip
