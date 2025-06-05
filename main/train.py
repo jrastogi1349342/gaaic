@@ -43,7 +43,7 @@ latent_dim = 32
 batch_size = 1 # must be 1, use multiple environments for parallel episodes
 training_batch_size = 128
 num_train_envs = 128
-num_timesteps = 115
+num_timesteps = 105
 gradient_update_freq = 128
 train_data = train_dataloader(batch_size=batch_size, num_workers=0)
 img_classifier = YOLO("yolo11n-cls.pt").to(device).eval()

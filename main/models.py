@@ -278,6 +278,7 @@ class PerturbationModel(nn.Module):
         gate_sum = sal_map_three_ch.sum(dim=(2, 3), keepdim=True) + 1e-6
         scale = area_px.view(-1, 1, 1, 1) / gate_sum.mean(dim=1, keepdim=True)
         sal_map_three_ch = sal_map_three_ch * scale
+        sal_map_one_ch = sal_map_one_ch * scale
 
         sparse_noise = full_noise * sal_map_three_ch
 
