@@ -245,12 +245,12 @@ class PerturbationModel(nn.Module):
 
     def spatial_entropy(self, mask, window_size=11, eps=1e-8):
         # Normalize to probability distribution per image
-        mask = mask / (mask.sum(dim=(2, 3), keepdim=True) + eps)
+        # mask = mask / (mask.sum(dim=(2, 3), keepdim=True) + eps)
 
         # Compute entropy over local windows
-        p = torch.clamp(mask, min=eps)
-        logp = p.log()
-        entropy = -p * logp  # [B, 1, H, W]
+        # p = torch.clamp(mask, min=eps)
+        log_mask = mask.log()
+        entropy = -mask * log_mask  # [B, 1, H, W]
 
         # Local averaging (moving window)
         local_entropy = F.avg_pool2d(entropy, kernel_size=window_size, stride=1, padding=window_size // 2)
@@ -271,6 +271,15 @@ class PerturbationModel(nn.Module):
         full_noise = self.deconv(x) * 2 # [B, 3, H, W], [-2, 2]
 
         sal_map_three_ch, sal_map_one_ch = self.mha_sal(latent_state_spatial, action_delta)
+
+        sal_map_three_ch = sal_map_three_ch.clamp(min=1e-8)
+        sal_map_one_ch = sal_map_one_ch.clamp(min=1e-8)
+
+        sum_3ch = sal_map_three_ch.sum(dim=(2, 3), keepdim=True) + 1e-8
+        sum_1ch = sal_map_one_ch.sum(dim=(2, 3), keepdim=True) + 1e-8
+
+        sal_map_three_ch = sal_map_three_ch / sum_3ch
+        sal_map_one_ch = sal_map_one_ch / sum_1ch
 
         entropy = self.spatial_entropy(sal_map_one_ch)
 
