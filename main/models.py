@@ -221,6 +221,12 @@ class PerturbationModel(nn.Module):
         # Saliency map (same spatial resolution as output)
         self.mha_sal = SaliencyMap(latent_dim, device=device)
 
+        self.entr_scale_fuser = nn.Sequential(
+            nn.Linear(3, 16),
+            nn.ReLU(),
+            nn.Linear(16, 3)
+        )
+
     # a = pi(s), for latent state s
     def forward(self, x): 
         x = self.downsampled_enc(x)
@@ -242,22 +248,32 @@ class PerturbationModel(nn.Module):
         
     def set_training_mode(self, mode: bool):
         self.train(mode)
+    
+    def fused_multiscale_entropy(self, mask, fuser_mlp, quantile=0.75):
+        """
+        Args:
+            mask: [B, 1, H, W] saliency map (values in [0,1])
+            fuser_mlp: a small MLP that takes [B, 3] and outputs [B, 3]
+            quantile: quantile to pool each scale's entropy
+        Returns:
+            fused_entropy: [B] scalar per image
+        """
+        B, _, H, W = mask.shape
+        scales = [5, 11, 21]  # kernel sizes
+        entropy_vals = []
 
-    def spatial_entropy(self, mask, window_size=11, eps=1e-8):
-        # Normalize to probability distribution per image
-        # mask = mask / (mask.sum(dim=(2, 3), keepdim=True) + eps)
+        for k in scales:
+            local = F.avg_pool2d(mask, k, stride=1, padding=k // 2)
+            probs = local / (local.sum(dim=(2, 3), keepdim=True) + 1e-8)
+            entropy = -(probs * (probs + 1e-8).log())  # [B, 1, H, W]
+            entropy_vals.append(torch.quantile(entropy.view(B, -1), q=quantile, dim=1))  # [B]
 
-        # Compute entropy over local windows
-        # p = torch.clamp(mask, min=eps)
-        log_mask = mask.log()
-        entropy = -mask * log_mask  # [B, 1, H, W]
+        entropy_stack = torch.stack(entropy_vals, dim=1)  # [B, 3]
+        weights = torch.softmax(fuser_mlp(entropy_stack), dim=1)  # [B, 3]
+        fused_entropy = (entropy_stack * weights).sum(dim=1)  # [B]
 
-        # Local averaging (moving window)
-        local_entropy = F.avg_pool2d(entropy, kernel_size=window_size, stride=1, padding=window_size // 2)
-
-        # Return mean local entropy per sample
-        return local_entropy.mean(dim=(1, 2, 3))  # [B]
-        
+        return fused_entropy
+                
     def adaptive_area(self, entropy, min_ratio=0.0066667, max_ratio=0.066667, alpha=5.0):
         norm_entropy = (entropy - entropy.min()) / (entropy.max() - entropy.min() + 1e-6)  # [B]
         return min_ratio + (max_ratio - min_ratio) * torch.sigmoid(-alpha * (norm_entropy - 0.5))
@@ -281,17 +297,23 @@ class PerturbationModel(nn.Module):
         sal_map_three_ch = sal_map_three_ch / sum_3ch
         sal_map_one_ch = sal_map_one_ch / sum_1ch
 
-        entropy = self.spatial_entropy(sal_map_one_ch)
+        entropy = self.fused_multiscale_entropy(sal_map_one_ch, self.entr_scale_fuser)
+        area_ratio = self.adaptive_area(entropy)
 
-        area_px = self.adaptive_area(entropy) * 224 * 224 * 3
-        gate_sum = sal_map_three_ch.sum(dim=(2, 3), keepdim=True) + 1e-6
-        scale = area_px.view(-1, 1, 1, 1) / gate_sum.mean(dim=1, keepdim=True)
-        sal_map_three_ch = sal_map_three_ch * scale
-        sal_map_one_ch = sal_map_one_ch * scale
+        area_px_one_ch = area_ratio * (224 ** 2)
+        area_px_three_ch = area_px_one_ch * 3
+
+        gate_sum_three_ch = sal_map_three_ch.sum(dim=(2, 3), keepdim=True) + 1e-6
+        scale_three_ch = area_px_three_ch.view(-1, 1, 1, 1) / gate_sum_three_ch.mean(dim=1, keepdim=True)
+        sal_map_three_ch = sal_map_three_ch * scale_three_ch
+
+        gate_sum_one_ch = sal_map_one_ch.sum(dim=(2, 3), keepdim=True) + 1e-6
+        scale_one_ch = area_px_one_ch.view(-1, 1, 1, 1) / gate_sum_one_ch 
+        sal_map_one_ch = sal_map_one_ch * scale_one_ch
 
         sparse_noise = full_noise * sal_map_three_ch
 
-        return sparse_noise, sal_map_three_ch, sal_map_one_ch, entropy, area_px
+        return sparse_noise, sal_map_three_ch, sal_map_one_ch, entropy, area_px_one_ch
     
     def contr_loss_forward(self, x): # [B, 512]
         return F.normalize(self.downsampled_enc(x), dim=1)  # [B, latent_dim]

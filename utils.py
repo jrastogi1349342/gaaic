@@ -76,7 +76,7 @@ def display_before_after(clean, perturbed, noise, info, gate_mask=None, num_imgs
         gate_mask = np.clip(gate_mask, 0, 1)
 
     # Create figure
-    fig, axes = plt.subplots(num_rows, num_imgs, figsize=(12, 6))
+    fig, axes = plt.subplots(num_rows, num_imgs, figsize=(16, 10))
     axes = axes.flatten()
 
     for i in range(num_imgs):

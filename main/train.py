@@ -232,7 +232,7 @@ def train_model(
                     target_q = batch.rewards.unsqueeze(1) + gamma * (1 - batch.dones.unsqueeze(1)) * (q_next - policy.alpha.detach() * next_log_probs)
 
                 # Actor update
-                downsampled_obs, new_actions_upsampled, gate_mask, one_channel_mask, entropy, target_area, new_action_deltas, log_probs = policy.predict_action_with_prob_upsampling(curr_spatial, latent_obs, deterministic=False)
+                downsampled_obs, new_actions_upsampled, gate_mask, one_channel_mask, entropy, target_area_one_ch, new_action_deltas, log_probs = policy.predict_action_with_prob_upsampling(curr_spatial, latent_obs, deterministic=False)
 
                 # Assume the prediction from the classifier on the original image is the true result, even if that's not true
                 orig_results, perturbed_results, orig_denormalized, perturbed_denormalized = apply_action_grad(img_classifier, batch.observations, new_actions_upsampled)
@@ -287,7 +287,7 @@ def train_model(
 
                 brightness_loss = F.mse_loss(brightness(orig_denormalized), brightness(perturbed_denormalized))
 
-                gate_area_loss = F.relu(one_channel_mask.sum(dim=(2, 3), keepdim=True) - target_area).mean()
+                gate_area_loss = F.relu(one_channel_mask.sum(dim=(2, 3), keepdim=True) - target_area_one_ch).mean()
 
                 input_flat = orig_denormalized.view(batch_size, -1)
                 perturb_flat = perturbed_denormalized.view(batch_size, -1)
@@ -369,7 +369,7 @@ def train_model(
                 high_freq_losses.append(high_freq_loss.item())
                 sal_contr_losses.append(sal_contr_loss.item())
                 sal_entr_losses.append(entropy_loss.item())
-                target_areas.append((torch.mean(target_area) / ((224 ** 2) * 3)).item())
+                target_areas.append((torch.mean(target_area_one_ch) / ((224 ** 2))).item())
 
                 # if i == 9: 
                 #     display_comp_graph(classification_loss, "perturbed_probs_comp_graph")
