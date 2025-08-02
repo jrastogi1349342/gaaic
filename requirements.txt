@@ -8,3 +8,6 @@ zarr
 numcodecs
 torchviz
 scikit-learn
+lpips
+seaborn
+matplotlib

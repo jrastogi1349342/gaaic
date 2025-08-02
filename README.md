@@ -1,5 +1,9 @@
 # Generative Adversarial Attacks on Image Classification
 
+This was developed as my semester-long project for ENAE788z (Decision Making Under Uncertainty) at UMD in Spring 2025. 
+
+## Results
+Unfortunately, this idea didn't fully pan out in practice. See `deliverables/` for my paper (not published) and presentation on this project. 
 
 
 ## How to Run
