@@ -7,7 +7,7 @@ Unfortunately, this idea didn't fully pan out in practice. See `deliverables/` f
 
 
 ## How to Run
-1. Set up a venv environment: `python3.11 -m venv tapod_env`
+1. Set up a venv environment: `python3.11 -m venv env`
 2. Install the requirements: `pip install -r requirements.txt`
 3. Skip to the desired section (training or inference)
 
